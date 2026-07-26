@@ -58,6 +58,23 @@ pkg_build() {
         -DSDL_OPENGL=OFF
     cmake --build build -j"$JOBS"
     DESTDIR="$PKG_STAGE" cmake --install build
-    # sdl2-config 是 shell 脚本（被 SDL2_image/mixer/ttf 的 configure 调用），
-    # 内部硬编码了 $PREFIX/bin/sdl2-config 路径，无需特殊处理
+
+    # CMake 构建的 SDL2 不会生成 sdl2.pc（pkg-config 文件），
+    # 但 SDL2_image/mixer/ttf 的 autotools configure 依赖 pkg-config 找 sdl2
+    # 才能拿到 -I$PREFIX/include/SDL2 和 -L$PREFIX/lib -lSDL2。
+    # 手写一份最小化的 sdl2.pc 到 staging，给后续 3 个子包用。
+    local pc_dir="$PKG_STAGE$PREFIX/lib/pkgconfig"
+    mkdir -p "$pc_dir"
+    cat >"$pc_dir/sdl2.pc" <<EOF
+prefix=$PREFIX
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: sdl2
+Description: Simple DirectMedia Layer
+Version: $PKG_VERSION
+Libs: -L\${libdir} -lSDL2
+Cflags: -I\${includedir}/SDL2
+EOF
 }
