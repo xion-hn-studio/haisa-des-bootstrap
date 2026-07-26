@@ -21,10 +21,10 @@ pkg_build() {
         --disable-music-midi \
         --disable-examples
     # 同 sdl2_image：跳过 playwave/playmus 示例（Android 上 main 被 SDL_main 宏吃掉）
-    # noinst_PROGRAMS= 在某些 Makefile.am 结构中无效（用了自定义 build/ 子目录规则），
-    # 改用 install-libLTLIBRARIES install-dataDATA 只装库和头文件，跳过 install-exec-am
-    make -j"$JOBS" noinst_PROGRAMS= bin_PROGRAMS=
-    make install DESTDIR="$PKG_STAGE" noinst_PROGRAMS= bin_PROGRAMS= \
-        install-libLTLIBRARIES install-dataDATA install-pkgconfigDATA 2>/dev/null || \
-    make install DESTDIR="$PKG_STAGE" noinst_PROGRAMS= bin_PROGRAMS=
+    # SDL2_mixer 2.8 的 Makefile.am 用硬编码 noinst_PROGRAMS = build/playwave build/playmus
+    # 通过变量覆盖无效（all 目标规则强制构建）。configure 后用 sed 把 Makefile 中的
+    # playwave/playmus 引用全部清空，彻底跳过示例链接。
+    sed -i 's/build\/playwave//g; s/build\/playmus//g' Makefile
+    make -j"$JOBS"
+    stage_install
 }
