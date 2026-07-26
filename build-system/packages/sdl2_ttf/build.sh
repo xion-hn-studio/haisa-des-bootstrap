@@ -8,6 +8,10 @@ PKG_SRC_DIR="SDL2_ttf-2.22.0"
 pkg_build() {
     # SDL2_ttf 通过 pkg-config 找 sdl2 与 freetype2，已在工具链文件设置
     # harfbuzz 已禁用（freetype 构建时 --with-harfbuzz=no）
+    #
+    # SDL_CFLAGS/SDL_LIBS 同 sdl2_image：覆盖 pkg-config 的设备路径 cflags。
+    export SDL_CFLAGS="-I$STAGE_DIR$PREFIX/include/SDL2"
+    export SDL_LIBS="-L$STAGE_DIR$PREFIX/lib -lSDL2"
     gnu_configure \
         --with-sdl-prefix="$PREFIX" \
         --disable-harfbuzz
