@@ -16,7 +16,9 @@ pkg_build() {
         --with-sdl-prefix="$PREFIX" \
         --disable-harfbuzz \
         --disable-examples
-    # 同 sdl2_image：跳过示例（Android 上 main 被 SDL_main 宏吃掉）
-    make -j"$JOBS" noinst_PROGRAMS=
-    stage_install noinst_PROGRAMS=
+    # 同 sdl2_image/mixer：跳过示例（Android 上 main 被 SDL_main 宏吃掉）
+    # 删除 Makefile 中含 glfont/ttfview 的行，跳过示例构建与链接
+    sed -i '/glfont/d; /ttfview/d' Makefile
+    make -j"$JOBS"
+    stage_install
 }
