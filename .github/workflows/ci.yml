@@ -8,20 +8,20 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# -----------------------------------------------------------
+# bootstrap 仓库 CI
+#
+# 设计：构建和发布合并在同一 job，避免 artifact 中转（配额受限时不可靠）。
+#   - bootstrap (prod): 构建 + 产 artifact + tag 触发时直接 gh release upload
+#   - bootstrap (test): 构建 + 产 artifact（Termux 冒烟测试用）
+#
+# 资源流转（tag 触发）：
+#   prod job 构建 → 直接上传到 haisa-des-repo Releases
+#   haisa-des 软件 CI → 从 Releases latest/download/ 拉 bootstrap.zip
+#   App 端 → 从 Releases latest/download/ 拉 packages.json / bootstrap-version.json
+# -----------------------------------------------------------
+
 jobs:
-  # -----------------------------------------------------------
-  # 交叉编译：NDK r29 构建 14 个包 → bootstrap.zip + 单包 tar.gz + packages.json + bootstrap-version.json
-  #
-  # 仓库职责：
-  #   - 本仓库（haisa-des-bootstrap）专注 bootstrap 源码构建
-  #   - push 触发：产 artifact（7 天保留），供调试/下载
-  #   - tag 触发：上传到 haisa-des-repo Releases，供 App 端 + haisa-des 软件 CI 拉取
-  #
-  # 资源流转：
-  #   - tag 触发 → 本 CI 上传到 XION-HN/haisa-des-repo Releases
-  #   - haisa-des 软件 CI → 从 Releases latest/download/ 拉 bootstrap.zip 注入 APK
-  #   - App 端 → 从 Releases latest/download/ 拉 packages.json / bootstrap-version.json
-  # -----------------------------------------------------------
   bootstrap:
     runs-on: ubuntu-latest
     strategy:
@@ -65,8 +65,8 @@ jobs:
           cd build-system
           ./make-bootstrap-version.sh
 
-      - name: Upload bootstrap artifacts
-        continue-on-error: true   # 配额耗尽时不阻塞 CI（产物仍会 push 到 Releases）
+      - name: Upload bootstrap artifacts (CI 内调试用)
+        continue-on-error: true   # 配额耗尽时不阻塞（产物仍可 push 到 Releases）
         uses: actions/upload-artifact@v4
         with:
           name: bootstrap-${{ matrix.variant }}
@@ -78,39 +78,27 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # -----------------------------------------------------------
-  # tag 触发：上传 bootstrap + packages.json + version.json 到公开发布仓库
-  # 跨仓库 release 上传需 PAT（RELEASE_REPO_TOKEN secret，需 haisa-des-repo 的 contents:write 权限）
-  # -----------------------------------------------------------
-  publish:
-    needs: [bootstrap]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download bootstrap-prod artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: bootstrap-prod
-          path: dist
-
-      - name: List downloaded artifacts
-        run: ls -la dist/
-
-      - name: Create release on haisa-des-repo and upload assets
+      # -----------------------------------------------------------
+      # tag 触发：prod job 直接上传到 haisa-des-repo Releases
+      # 与构建在同一 job 内，不依赖 artifact 中转（配额受限时更可靠）
+      # -----------------------------------------------------------
+      - name: Publish to haisa-des-repo Releases
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.variant == 'prod'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
           set -e
-          # 校验 token
           if [ -z "$GH_TOKEN" ]; then
             echo "错误: secrets.RELEASE_REPO_TOKEN 未配置（需 haisa-des-repo 的 PAT，contents:write 权限）"
             exit 1
           fi
 
           REPO="XION-HN/haisa-des-repo"
+          cd build-system/dist
+
+          echo "=== 待上传资产 ==="
+          ls -la bootstrap-arm64-v8a.zip packages.json bootstrap-version.json packages/*.tar.gz
 
           # 检查 release 是否已存在；不存在则创建（草稿，避免半成品暴露）
           if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
@@ -129,7 +117,6 @@ jobs:
           fi
 
           # 上传资产（同名会覆盖，便于重试）
-          cd dist
           gh release upload "$TAG" --repo "$REPO" \
             bootstrap-arm64-v8a.zip \
             packages.json \
