@@ -132,3 +132,83 @@ jobs:
           echo "    https://github.com/$REPO/releases/latest/download/bootstrap-arm64-v8a.zip"
           echo "    https://github.com/$REPO/releases/latest/download/packages.json"
           echo "    https://github.com/$REPO/releases/latest/download/bootstrap-version.json"
+
+  # -----------------------------------------------------------
+  # wheels job（M3.1 B1 阶段）：拉取 PyPI aarch64 manywheel + 索引
+  # 独立于 bootstrap job，可并行；不依赖 staging / QEMU
+  #   - 仅 download 方法（numpy/Pillow/lxml）
+  #   - pygame source 方法留到 B4（需 staging SDL2 + QEMU binfmt）
+  # tag 触发时上传 wheels + wheels-index.json 到 Releases
+  # -----------------------------------------------------------
+  wheels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build wheels (download method)
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd build-system
+          # 仅跑 download 方法（pygame source 方法需 staging SDL2 + QEMU，B4 阶段启用）
+          ./wheels/build-wheels.sh build numpy Pillow lxml
+
+      - name: Generate wheels index
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd build-system
+          ./make-wheels-index.sh
+
+      - name: Upload wheels artifacts (CI 内调试用)
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: |
+            build-system/dist/wheels/*.whl
+            build-system/dist/wheels-index.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Publish wheels to haisa-des-repo Releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          if [ -z "$GH_TOKEN" ]; then
+            echo "错误: secrets.RELEASE_REPO_TOKEN 未配置"
+            exit 1
+          fi
+
+          REPO="XION-HN/haisa-des-repo"
+          cd build-system/dist
+
+          echo "=== 待上传 wheel 资产 ==="
+          ls -la wheels/*.whl wheels-index.json
+
+          # release 应已被 bootstrap job 创建（同 tag）；若不存在则创建
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$REPO" \
+              --title "bootstrap $TAG" \
+              --notes "wheels release $TAG（由 wheels job 单独发布）" --draft
+          fi
+
+          gh release upload "$TAG" --repo "$REPO" \
+            wheels/*.whl \
+            wheels-index.json \
+            --clobber
+
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+
+          echo "✓ 已发布 wheels $TAG 到 $REPO"
+          echo "  下载链接:"
+          echo "    https://github.com/$REPO/releases/latest/download/wheels-index.json"

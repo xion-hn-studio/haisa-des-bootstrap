@@ -15,15 +15,18 @@ source "$BS_ROOT/config.sh"
 source "$BS_ROOT/lib/common.sh"
 
 # 包名列表（构建顺序即依赖顺序）
+# M3.1 扩展：SDL2 系列 7 包（libpng/libjpeg-turbo/freetype/SDL2/image/mixer/ttf）
+# 用于支持设备端 pip 安装 pygame 等图形库 wheel（无需 gcc）
 ALL_PACKAGES="zlib ncurses bash openssl ca-certificates curl toybox \
-              libffi sqlite bzip2 xz expat readline python"
+              libffi sqlite bzip2 xz expat readline python \
+              libpng libjpeg-turbo freetype sdl2 sdl2_image sdl2_mixer sdl2_ttf"
 
 pkg_deps() {
     case "$1" in
         zlib)            echo "" ;;
         ncurses)         echo "" ;;
         bash)            echo "ncurses" ;;
-        openssl)         echo "zlib" ;;
+        openssl)        echo "zlib" ;;
         ca-certificates) echo "" ;;
         curl)            echo "zlib openssl ca-certificates" ;;
         toybox)          echo "" ;;
@@ -34,6 +37,14 @@ pkg_deps() {
         expat)           echo "" ;;
         readline)        echo "ncurses" ;;
         python)          echo "zlib openssl ncurses readline libffi sqlite bzip2 xz expat" ;;
+        # ---- M3.1 SDL2 系列 ----
+        libpng)          echo "zlib" ;;
+        libjpeg-turbo)   echo "" ;;
+        freetype)        echo "zlib libpng bzip2" ;;
+        sdl2)            echo "" ;;
+        sdl2_image)      echo "sdl2 libpng libjpeg-turbo" ;;
+        sdl2_mixer)      echo "sdl2" ;;
+        sdl2_ttf)        echo "sdl2 freetype" ;;
         *) die "未知包: $1" ;;
     esac
 }
