@@ -20,7 +20,11 @@ pkg_build() {
         --disable-webp \
         --disable-tiff \
         --disable-jxl \
-        --disable-avif
-    make -j"$JOBS"
+        --disable-avif \
+        --disable-examples
+    # 跳过 examples：Android 上 main 被 SDL_main 宏吃掉，链接报
+    # undefined symbol: main。同时把 noinst_PROGRAMS 设空作双保险
+    # （configure 不识别 --disable-examples 时仍能跳过 examples 链接）
+    make -j"$JOBS" noinst_PROGRAMS=
     stage_install
 }
