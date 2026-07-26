@@ -53,12 +53,15 @@ resolve_pypi_wheel() {
     local name="$1" version="$2" py_tag="$3"
     local json_url="https://pypi.org/pypi/$name/$version/json"
     log "$name: 查询 PyPI JSON $json_url"
-    curl -sL --retry 3 --connect-timeout 30 "$json_url" | \
-    python3 - "$py_tag" <<'PYEOF'
-import json, sys
-py_tag = sys.argv[1]
-d = json.load(sys.stdin)
-# 优先匹配 manylinux aarch64 wheel
+    # 注意：不能 curl | python3 <<EOF —— heredoc 会覆盖管道 stdin
+    # 让 python 用 urllib 自己拉 URL（带 User-Agent 头，避免某些 CDN 403）
+    python3 - "$json_url" "$py_tag" <<'PYEOF'
+import json, sys, urllib.request
+url = sys.argv[1]
+py_tag = sys.argv[2]
+req = urllib.request.Request(url, headers={"User-Agent": "HaisaDes-build-wheels"})
+with urllib.request.urlopen(req, timeout=30) as r:
+    d = json.load(r)
 matches = []
 for u in d.get("urls", []):
     fn = u["filename"]
@@ -66,8 +69,6 @@ for u in d.get("urls", []):
         continue
     if "aarch64" not in fn:
         continue
-    # py_tag 形如 cp313；wheel 文件名形如 numpy-2.1.0-cp313-cp313-manylinux...aarch64.whl
-    # 简单包含匹配（同时接受 abi3/none 抽象 ABI 的 wheel）
     parts = fn.split("-")
     # wheel 文件名格式: {name}-{ver}-{py}-{abi}-{plat}-{build?}.whl
     if len(parts) >= 5:
@@ -78,7 +79,7 @@ for u in d.get("urls", []):
 if not matches:
     sys.stderr.write(f"未找到匹配 {py_tag}+aarch64 的 wheel\n")
     sys.exit(1)
-# 优先 manylinux，其次 linux
+# 优先 manylinux，其次 musllinux
 many = [m for m in matches if "manylinux" in m[0]]
 chosen = many[0] if many else matches[0]
 print(f"{chosen[1]} {chosen[2]}")
