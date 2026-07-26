@@ -1,0 +1,4 @@
+# build-system 产物
+build-system/dist/
+**/*.pyc
+__pycache__/
