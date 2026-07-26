@@ -52,7 +52,8 @@ staging_python() {
 resolve_pypi_wheel() {
     local name="$1" version="$2" py_tag="$3"
     local json_url="https://pypi.org/pypi/$name/$version/json"
-    log "$name: 查询 PyPI JSON $json_url"
+    # 注意：log() 写 stdout 会污染 resolved 变量；改用 stderr
+    printf '\033[1;34m[build]\033[0m %s\n' "$name: 查询 PyPI JSON $json_url" >&2
     # 注意：不能 curl | python3 <<EOF —— heredoc 会覆盖管道 stdin
     # 让 python 用 urllib 自己拉 URL（带 User-Agent 头，避免某些 CDN 403）
     python3 - "$json_url" "$py_tag" <<'PYEOF'
