@@ -20,11 +20,13 @@ pkg_build() {
         --disable-music-opus \
         --disable-music-midi \
         --disable-examples
-    # 同 sdl2_image：跳过 playwave/playmus 示例（Android 上 main 被 SDL_main 宏吃掉）
-    # SDL2_mixer 2.8 Makefile.am 用硬编码 noinst_PROGRAMS = build/playwave build/playmus
-    # noinst_PROGRAMS= 变量覆盖无效，sed -d 删除行会破坏 Makefile 结构（recipe 无目标）。
-    # 用 sed s||| 把 noinst_PROGRAMS 赋值行替换为空，只改变量值不破坏规则。
-    sed -i 's|^noinst_PROGRAMS = .*|noinst_PROGRAMS =|' Makefile
+    # sdl2_mixer 2.8 的 Makefile.in 是手写的（非 automake），all 目标硬编码依赖
+    #   all: ... Makefile $(objects)/$(TARGET) $(objects)/playwave$(EXE) $(objects)/playmus$(EXE)
+    # 没有 noinst_PROGRAMS 变量，noinst_PROGRAMS= 覆盖无效。
+    # 直接覆盖 all 行的依赖，只保留库本身，跳过 playwave/playmus 示例
+    # （Android 上 main 被 SDL_main 宏吃掉，链接报 undefined symbol: main）
+    sed -i 's|^all:.*|all: $(srcdir)/configure Makefile $(objects)/$(TARGET)|' Makefile
     make -j"$JOBS"
-    stage_install
+    # install 也依赖 all；用 install-lib/install-hdrs 子目标，跳过 install-bin（playwave/playmus）
+    make install-hdrs install-lib DESTDIR="$PKG_STAGE"
 }

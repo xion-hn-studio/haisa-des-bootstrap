@@ -16,9 +16,9 @@ pkg_build() {
         --with-sdl-prefix="$PREFIX" \
         --disable-harfbuzz \
         --disable-examples
-    # 同 sdl2_image/mixer：跳过示例（Android 上 main 被 SDL_main 宏吃掉）
-    # 用 sed s||| 把 noinst_PROGRAMS 赋值行替换为空，只改变量值不破坏规则
-    sed -i 's|^noinst_PROGRAMS = .*|noinst_PROGRAMS =|' Makefile
-    make -j"$JOBS"
-    stage_install
+    # 同 sdl2_image：sdl2_ttf 2.22 用 automake，PROGRAMS=$(noinst_PROGRAMS)，
+    # 命令行传 noinst_PROGRAMS= 覆盖即可跳过 glfont/showfont 示例
+    # （Android 上 main 被 SDL_main 宏吃掉，链接报 undefined symbol: main）
+    make -j"$JOBS" noinst_PROGRAMS=
+    stage_install noinst_PROGRAMS=
 }
