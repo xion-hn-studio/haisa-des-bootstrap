@@ -21,7 +21,7 @@ pkg_build() {
         -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI="arm64-v8a" \
         -DANDROID_PLATFORM="android-$API_LEVEL" \
-        -DANDROID_STL="none" \
+        -DANDROID_STL="c++_static" \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
         -DCMAKE_INSTALL_LIBDIR="lib" \
         -DCMAKE_FIND_ROOT_PATH="$STAGE_DIR$PREFIX" \
