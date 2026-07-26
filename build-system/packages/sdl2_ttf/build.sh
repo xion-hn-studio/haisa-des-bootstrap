@@ -14,7 +14,9 @@ pkg_build() {
     export SDL_LIBS="-L$STAGE_DIR$PREFIX/lib -lSDL2"
     gnu_configure \
         --with-sdl-prefix="$PREFIX" \
-        --disable-harfbuzz
-    make -j"$JOBS"
-    stage_install
+        --disable-harfbuzz \
+        --disable-examples
+    # 同 sdl2_image：跳过示例（Android 上 main 被 SDL_main 宏吃掉）
+    make -j"$JOBS" noinst_PROGRAMS=
+    stage_install noinst_PROGRAMS=
 }

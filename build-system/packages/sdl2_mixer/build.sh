@@ -18,7 +18,9 @@ pkg_build() {
         --disable-music-flac \
         --disable-music-mod \
         --disable-music-opus \
-        --disable-music-midi
-    make -j"$JOBS"
-    stage_install
+        --disable-music-midi \
+        --disable-examples
+    # 同 sdl2_image：跳过 playwave/playmus 示例（Android 上 main 被 SDL_main 宏吃掉）
+    make -j"$JOBS" noinst_PROGRAMS=
+    stage_install noinst_PROGRAMS=
 }
