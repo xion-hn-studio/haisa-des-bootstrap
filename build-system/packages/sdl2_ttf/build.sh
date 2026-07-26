@@ -9,11 +9,13 @@ pkg_build() {
     # SDL2_ttf 通过 pkg-config 找 sdl2 与 freetype2，已在工具链文件设置
     # harfbuzz 已禁用（freetype 构建时 --with-harfbuzz=no）
     #
-    # SDL_CFLAGS/SDL_LIBS 同 sdl2_image：覆盖 pkg-config 的设备路径 cflags。
+    # 不能传 --with-sdl-prefix：sdl2.m4 中传该参数会跳过 pkg-config，转而用
+    # $sdl_prefix/bin/sdl2-config（设备路径，CI 主机不存在），导致 configure 失败。
+    # 同 sdl2_image/mixer：不传 prefix，让 pkg-config 检测 SDL；SDL_CFLAGS/SDL_LIBS
+    # 覆盖 pkg-config 返回的设备路径 cflags。
     export SDL_CFLAGS="-I$STAGE_DIR$PREFIX/include/SDL2"
     export SDL_LIBS="-L$STAGE_DIR$PREFIX/lib -lSDL2"
     gnu_configure \
-        --with-sdl-prefix="$PREFIX" \
         --disable-harfbuzz \
         --disable-examples
     # 同 sdl2_image：sdl2_ttf 2.22 用 automake，PROGRAMS=$(noinst_PROGRAMS)，
