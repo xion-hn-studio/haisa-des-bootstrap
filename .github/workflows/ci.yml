@@ -47,16 +47,12 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
           cd build-system
           ./build.sh build all
-          # 注意：不在此调用 make-bootstrap.sh。
-          # make-bootstrap.sh 会删除 staging 里的全部符号链接（含 python3 -> python3.13），
-          # 而后续 pygame wheel 构建需要 staging python3 可执行。make-bootstrap 移到
-          # pygame wheel 之后作为最终打包步骤。
+          # 注意：不在此调用 make-bootstrap.sh，留作最终打包步骤（见下）。
 
-      # pygame wheel 暂不在此构建：source 方法需运行 staging 的 aarch64 python3，
-      # 但 QEMU 无法运行 Android 动态链接二进制（缺 /system/bin/linker64 + bionic
-      # runtime，NDK 仅提供 stub libc.so 用于链接）。pygame wheel 改为设备端
-      # 预构建后作为 release asset 上传，CI 只构建 numpy/Pillow/lxml。
-      # numpy/Pillow/lxml 用 download 方法（从 PyPI 拉 aarch64 manywheel，纯下载）。
+      # 全部 4 个 wheel（numpy/Pillow/lxml/pygame）统一用 download 方法：
+      # 从 PyPI 拉 aarch64 manylinux wheel（纯下载，无编译）。
+      # pygame 2.6.1 起官方发 cp313 aarch64 manylinux wheel，与 numpy/Pillow/lxml 同机制，
+      # 无需 source 交叉编译，避开 QEMU binfmt 无法运行 Android 动态链接 python3 的限制。
       - name: Build wheels (download method, prod only)
         if: matrix.variant == 'prod'
         env:
@@ -64,11 +60,12 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           cd build-system
-          ./wheels/build-wheels.sh build numpy Pillow lxml
+          ./wheels/build-wheels.sh build numpy Pillow lxml pygame
           ./make-wheels-index.sh
 
-      # make-bootstrap 是最终打包步骤：会删除 staging 符号链接，必须在所有需要
-      # staging 完整性的构建之后。test variant 直接在此打包。
+      # make-bootstrap 是最终打包步骤：会删除 staging 符号链接。
+      # 全部 wheel 用 download 方法后不再依赖 staging python3，但 make-bootstrap 仍需
+      # 放在 build all 之后（要打包 staging 内容）。test variant 直接在此打包。
       - name: Make bootstrap
         env:
           VARIANT: ${{ matrix.variant }}
@@ -167,7 +164,7 @@ jobs:
 
   # -----------------------------------------------------------
   # wheels job：仅 push to main 时跑，快速验证 download 方法的 wheel URL 仍可用
-  # tag 触发时跳过 —— prod job 已构建全部 4 个 wheel（含 pygame）并发布
+  # tag 触发时跳过 —— prod job 已构建全部 4 个 wheel（numpy/Pillow/lxml/pygame）并发布
   # -----------------------------------------------------------
   wheels:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -183,8 +180,8 @@ jobs:
       - name: Build wheels (download method)
         run: |
           cd build-system
-          # 仅跑 download 方法（pygame source 方法在 prod job 内构建）
-          ./wheels/build-wheels.sh build numpy Pillow lxml
+          # 全部 4 个 wheel 走 download 方法，push to main 时快速验证 URL 可达
+          ./wheels/build-wheels.sh build numpy Pillow lxml pygame
 
       - name: Upload wheels artifacts (CI 内调试用)
         continue-on-error: true
