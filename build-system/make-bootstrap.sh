@@ -51,9 +51,33 @@ print("written:", out)
 PYEOF
 
 # 3) 每包独立 tar.gz（路径相对 prefix 根，便于手动装包演练: tar -xzf x.tar.gz -C $PREFIX）
+# 内置包（已包含在 bootstrap.zip 内的脚本/工具）：不打单独 tar.gz，也不进 packages.json
+# - apt: 包管理器 CLI，依赖 bootstrap 已有命令；发布到 Releases 反而是冗余
+# - pip: wrapper 脚本，接管 pip 命令优先查本地 wheel 索引；原版 pip 在此重命名为 pip.real
+BUILTIN_PACKAGES="apt pip"
+
+# 在打包前处理 pip wrapper：把原版 pip 重命名为 pip.real
+# （pip 包的 staging 已含 wrapper 脚本，merge 后会覆盖原版 pip；这里先备份原版）
+# 注意：pip wrapper 包 install 时已创建 pip3/pip3.13 → pip 符号链接，
+# 但原版 python 包安装时也创建了 pip → pip3.13 的符号链接，会被 wrapper 包覆盖。
+# 重命名原版 pip 入口（python 包提供），让 wrapper 能透传未拦截命令给原版。
+# 必须在 pip 包合并到总 staging 之后、打 zip 之前做。
+# （pip 包 build 顺序在 python 之后，merge_stage 已让 pip wrapper 覆盖了原版 pip；
+#  这里针对 wrapper 包的特殊情况，重新整理 pip 入口）
+real_pip="$SROOT/bin/pip.real"
+orig_pip="$SROOT/bin/pip3.13"
+if [ -x "$orig_pip" ] && [ ! -e "$real_pip" ]; then
+    # wrapper 包已把 wrapper 装到 bin/pip，但 wrapper 需要 pip.real 作为原版入口
+    # 此时 bin/pip3.13 是 python 包安装的原版入口，把它复制为 pip.real
+    cp "$orig_pip" "$real_pip"
+    log "已备份原版 pip 入口到 $real_pip"
+fi
 for stage in "$PKG_STAGE_ROOT"/*/; do
     name="$(basename "$stage")"
     [ -f "$stage/.done" ] || continue
+    case " $BUILTIN_PACKAGES " in
+        *" $name "*) log "跳过内置包 $name（已包含在 bootstrap.zip）"; continue ;;
+    esac
     # 从包定义取版本号
     PKG_NAME="" PKG_VERSION=""
     unset -f pkg_build pkg_prepare_src 2>/dev/null || true

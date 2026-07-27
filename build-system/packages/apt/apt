@@ -1,0 +1,891 @@
+#!/data/data/com.haisades/files/usr/bin/bash
+# apt —— haisa-des 包管理器命令行（Debian apt 风格）
+#
+# 操作自有仓库 XION-HN/haisa-des-repo 的 Releases 资产：
+#   - 原生包：tar.gz 归档 + packages.json 索引（与 App 端 PackageManager 共用）
+#   - Python wheel：wheels-index.json 索引（与 App 端 installPythonPackage 共用）
+#
+# 与 App 端 PackageManager 的状态共享：
+#   $PREFIX/var/installed/<name>         版本号（已装）
+#   $PREFIX/var/installed/<name>.files  文件清单（卸载按引用计数）
+#   $PREFIX/var/installed/<name>.hold   hold 标记（不参与 upgrade）
+#   $PREFIX/var/installed/<name>.desc   描述（可选）
+#
+# 镜像索引独立持久化在 $PREFIX/var/pkg/mirror（CLI 端），
+# 与 App 端 SharedPreferences 默认值一致（都默认 0=直连）。
+set -euo pipefail
+
+# ------------------------------------------------------------------
+# 路径与常量
+# ------------------------------------------------------------------
+PREFIX="${PREFIX:-/data/data/com.haisades/files/usr}"
+INSTALLED_DIR="$PREFIX/var/installed"
+CACHE_DIR="$PREFIX/var/cache/pkg"
+STATE_DIR="$PREFIX/var/pkg"
+INDEX_FILE="$CACHE_DIR/packages.json"
+WHEELS_INDEX_FILE="$CACHE_DIR/wheels-index.json"
+WHEEL_CACHE_DIR="$CACHE_DIR/wheel-cache"
+MIRROR_FILE="$STATE_DIR/mirror"
+
+# 发布仓库（public，CLI 无 token 直连）
+RELEASE_REPO_OWNER="XION-HN"
+RELEASE_REPO_NAME="haisa-des-repo"
+GITHUB_BASE="https://github.com/${RELEASE_REPO_OWNER}/${RELEASE_REPO_NAME}"
+
+# 镜像表：prefix 为空 = 直连；否则是 URL 前缀（前缀式代理）
+MIRROR_PREFIXES=(
+    ""
+    "https://ghproxy.com/"
+    "https://gh-proxy.com/"
+)
+MIRROR_LABELS=(
+    "默认（GitHub 直连）"
+    "ghproxy.com"
+    "gh-proxy.com"
+)
+DEFAULT_MIRROR_INDEX=0
+
+# ------------------------------------------------------------------
+# 基础工具
+# ------------------------------------------------------------------
+log()  { printf '\033[1;34m[apt]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
+err()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# 确保关键工具存在（按需调用，避免 help/info 这类纯查询命令也强依赖）
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1（请先安装 bootstrap）"
+}
+
+# 涉及网络/校验/解压的命令统一检查 bootstrap 必备工具
+require_bootstrap_tools() {
+    need_cmd curl
+    need_cmd tar
+    need_cmd sha256sum
+    need_cmd python3
+}
+
+# ------------------------------------------------------------------
+# 镜像管理
+# ------------------------------------------------------------------
+get_mirror_index() {
+    [ -f "$MIRROR_FILE" ] && cat "$MIRROR_FILE" 2>/dev/null || echo "$DEFAULT_MIRROR_INDEX"
+}
+
+set_mirror_index() {
+    local idx="$1"
+    mkdir -p "$STATE_DIR"
+    echo "$idx" > "$MIRROR_FILE"
+}
+
+# 用指定镜像索引重写 URL（不改 MIRROR_FILE）
+apply_mirror_with_index() {
+    local idx="$1" url="$2"
+    [ "$idx" -lt 0 ] 2>/dev/null && idx="$DEFAULT_MIRROR_INDEX"
+    [ "$idx" -ge "${#MIRROR_PREFIXES[@]}" ] && idx="$DEFAULT_MIRROR_INDEX"
+    local prefix="${MIRROR_PREFIXES[$idx]}"
+    [ -z "$prefix" ] && { echo "$url"; return; }
+    case "$url" in
+        https://github.com/*) echo "${prefix}${url}" ;;
+        *) echo "$url" ;;
+    esac
+}
+
+# 用当前镜像重写 URL（从 MIRROR_FILE 读索引）
+apply_mirror() {
+    apply_mirror_with_index "$(get_mirror_index)" "$1"
+}
+
+# 环形遍历镜像 + 指数退避重试
+# 用法: http_get_with_retry <url> <dest_file|-> 
+http_get_with_retry() {
+    local url="$1" dest="$2"
+    local user_mirror idx prefix try_url
+    user_mirror=$(get_mirror_index)
+    local n=${#MIRROR_PREFIXES[@]}
+    local max_retries=2
+    local backoff=1
+    local last_err=""
+    local offset m attempt
+
+    for offset in $(seq 0 $((n - 1))); do
+        m=$(( (user_mirror + offset) % n ))
+        try_url=$(apply_mirror_with_index "$m" "$url")
+        for attempt in $(seq 1 $max_retries); do
+            log "GET $try_url (镜像=${MIRROR_LABELS[$m]}, 尝试 $attempt/$max_retries)"
+            if curl -fL --connect-timeout 15 --max-time 600 \
+                    -H "User-Agent: HaisaDes-apt/1.0" \
+                    -o "$dest" "$try_url" 2>/dev/null; then
+                return 0
+            fi
+            last_err="curl 失败: $try_url"
+            warn "$last_err"
+            [ "$attempt" -lt "$max_retries" ] && sleep "$backoff" && backoff=$((backoff * 2))
+        done
+    done
+    die "所有镜像均失败: $last_err"
+}
+
+# ------------------------------------------------------------------
+# JSON 解析（用 python3，bootstrap 自带）
+# ------------------------------------------------------------------
+# 用法: json_get <file> <jq-like-path>... 输出值
+# 简化版：直接用 python3 -c 一次性取值，避免反复启动进程
+py_json() {
+    python3 -c "$1" "${@:2}"
+}
+
+# ------------------------------------------------------------------
+# apt update —— 拉取索引
+# ------------------------------------------------------------------
+cmd_update() {
+    require_bootstrap_tools
+    mkdir -p "$CACHE_DIR"
+    local url="$GITHUB_BASE/releases/latest/download/packages.json"
+    log "拉取包索引..."
+    http_get_with_retry "$url" "$INDEX_FILE"
+    local count
+    count=$(python3 -c "import json;print(len(json.load(open('$INDEX_FILE'))['packages']))" 2>/dev/null || echo "?")
+    log "✓ 已更新包索引（$count 个包）"
+
+    # 同时拉 wheel 索引（Python 包安装用）
+    local wurl="$GITHUB_BASE/releases/latest/download/wheels-index.json"
+    log "拉取 wheel 索引..."
+    if http_get_with_retry "$wurl" "$WHEELS_INDEX_FILE"; then
+        local wcount
+        wcount=$(python3 -c "import json;print(len(json.load(open('$WHEELS_INDEX_FILE'))['wheels']))" 2>/dev/null || echo "?")
+        log "✓ 已更新 wheel 索引（$wcount 个 wheel）"
+    else
+        warn "wheel 索引拉取失败，pip install 仍可用（走 PyPI）"
+    fi
+}
+
+ensure_index() {
+    [ -f "$INDEX_FILE" ] || die "包索引不存在，请先 apt update"
+}
+
+ensure_wheels_index() {
+    [ -f "$WHEELS_INDEX_FILE" ] || die "wheel 索引不存在，请先 apt update"
+}
+
+# ------------------------------------------------------------------
+# apt list —— 列出包
+# ------------------------------------------------------------------
+cmd_list() {
+    require_bootstrap_tools
+    ensure_index
+    local filter="${1:-}"
+    case "$filter" in
+        --installed)
+            list_installed
+            ;;
+        --upgradable)
+            list_upgradable
+            ;;
+        "")
+            python3 - "$INDEX_FILE" "$INSTALLED_DIR" <<'PY'
+import json, sys, os
+idx = json.load(open(sys.argv[1]))
+inst_dir = sys.argv[2]
+installed = {}
+for fn in os.listdir(inst_dir) if os.path.isdir(inst_dir) else []:
+    if '.' in fn or fn.startswith('.'): continue
+    try:
+        with open(os.path.join(inst_dir, fn)) as f: installed[fn] = f.read().strip()
+    except: pass
+for p in idx['packages']:
+    name = p['name']; ver = p['version']
+    state = ''
+    if name in installed:
+        if installed[name] == ver:
+            state = '[installed]'
+        else:
+            state = '[upgradable from %s]' % installed[name]
+    size_mb = p['size'] / 1024 / 1024
+    print(f"{name}/{ver} {state} {size_mb:.1f}MB")
+PY
+            ;;
+        *)
+            err "未知过滤参数: $filter"
+            die "用法: apt list [--installed|--upgradable]"
+            ;;
+    esac
+}
+
+list_installed() {
+    [ -d "$INSTALLED_DIR" ] || return 0
+    local name ver
+    for f in "$INSTALLED_DIR"/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        case "$name" in
+            *.files|*.hold|*.desc) continue ;;
+        esac
+        ver=$(cat "$f" 2>/dev/null || echo "?")
+        local held=""
+        [ -f "$INSTALLED_DIR/$name.hold" ] && held=" [held]"
+        echo "$name/$ver$held"
+    done
+}
+
+list_upgradable() {
+    ensure_index
+    [ -d "$INSTALLED_DIR" ] || return 0
+    python3 - "$INDEX_FILE" "$INSTALLED_DIR" <<'PY'
+import json, sys, os
+idx = json.load(open(sys.argv[1]))
+inst_dir = sys.argv[2]
+installed = {}
+for fn in os.listdir(inst_dir) if os.path.isdir(inst_dir) else []:
+    if '.' in fn or fn.startswith('.'): continue
+    try:
+        with open(os.path.join(inst_dir, fn)) as f: installed[fn] = f.read().strip()
+    except: pass
+for p in idx['packages']:
+    name, ver = p['name'], p['version']
+    if name in installed and installed[name] != ver:
+        held = os.path.exists(os.path.join(inst_dir, name + '.hold'))
+        if held: continue  # held 包不参与 upgrade
+        print(f"{name}/{installed[name]} -> {ver}")
+PY
+}
+
+# ------------------------------------------------------------------
+# apt search —— 搜索包
+# ------------------------------------------------------------------
+cmd_search() {
+    require_bootstrap_tools
+    ensure_index
+    [ $# -eq 0 ] && die "用法: apt search <关键字>"
+    local kw="$1"
+    python3 - "$INDEX_FILE" "$kw" <<'PY'
+import json, sys
+idx = json.load(open(sys.argv[1]))
+kw = sys.argv[2].lower()
+for p in idx['packages']:
+    name = p['name']; ver = p['version']
+    desc = p.get('desc', '')
+    if kw in name.lower() or kw in desc.lower() or kw in ver.lower():
+        deps = ' '.join(p.get('depends', []))
+        size_mb = p['size'] / 1024 / 1024
+        print(f"{name}/{ver} {size_mb:.1f}MB")
+        if deps: print(f"  depends: {deps}")
+        if desc: print(f"  desc: {desc}")
+PY
+}
+
+# ------------------------------------------------------------------
+# apt show —— 显示包详情
+# ------------------------------------------------------------------
+cmd_show() {
+    require_bootstrap_tools
+    ensure_index
+    [ $# -eq 0 ] && die "用法: apt show <包名>"
+    local name="$1"
+    python3 - "$INDEX_FILE" "$INSTALLED_DIR" "$name" <<'PY'
+import json, sys, os
+idx = json.load(open(sys.argv[1]))
+inst_dir = sys.argv[2]
+name = sys.argv[3]
+found = None
+for p in idx['packages']:
+    if p['name'] == name:
+        found = p; break
+if not found:
+    sys.exit(f"未找到包: {name}")
+print(f"Package: {found['name']}")
+print(f"Version: {found['version']}")
+deps = found.get('depends', [])
+print(f"Depends: {', '.join(deps) if deps else '(无)'}")
+print(f"Size: {found['size']} bytes ({found['size']/1024/1024:.1f}MB)")
+print(f"Filename: {found['filename']}")
+print(f"SHA256: {found['sha256']}")
+print(f"Download: {found['download_url']}")
+sl = found.get('symlinks', [])
+if sl:
+    print(f"Symlinks: {len(sl)} 个")
+    for s in sl[:5]:
+        print(f"  {s['link']} -> {s['target']}")
+# 已装状态
+ver_file = os.path.join(inst_dir, name)
+if os.path.exists(ver_file):
+    with open(ver_file) as f: v = f.read().strip()
+    status = 'upgradable' if v != found['version'] else 'installed (latest)'
+    print(f"Status: {status} (本地版本 {v})")
+    if os.path.exists(os.path.join(inst_dir, name + '.hold')):
+        print(f"Hold: yes")
+else:
+    print(f"Status: not installed")
+PY
+}
+
+# ------------------------------------------------------------------
+# apt install —— 安装包（含依赖拓扑展开）
+# ------------------------------------------------------------------
+cmd_install() {
+    require_bootstrap_tools
+    ensure_index
+    [ $# -eq 0 ] && die "用法: apt install <包名>..."
+    local pkgs=("$@")
+    local order
+    order=$(resolve_deps "${pkgs[@]}")
+    log "安装顺序: $order"
+    local p
+    for p in $order; do
+        install_one "$p"
+    done
+    log "✓ 安装完成: ${pkgs[*]}"
+}
+
+# 拓扑展开依赖（被依赖的包先），调用 python 解析 packages.json
+resolve_deps() {
+    python3 - "$INDEX_FILE" "$@" <<'PY'
+import json, sys
+idx = json.load(open(sys.argv[1]))
+pkgs = {p['name']: p for p in idx['packages']}
+targets = sys.argv[2:]
+visited = set()
+order = []
+def visit(name):
+    if name in visited: return
+    visited.add(name)
+    if name not in pkgs:
+        sys.exit(f"索引中无包: {name}")
+    for d in pkgs[name].get('depends', []):
+        visit(d)
+    order.append(name)
+for t in targets: visit(t)
+print(' '.join(order))
+PY
+}
+
+# 安装单个包：跳过已装最新版 → 下载 → sha256 校验 → 解压 → 重建符号链接 → 记录清单
+install_one() {
+    local name="$1"
+    local ver_in_index
+    ver_in_index=$(python3 -c "
+import json
+idx=json.load(open('$INDEX_FILE'))
+for p in idx['packages']:
+    if p['name']=='$name':
+        print(p['version']); break
+" 2>/dev/null)
+    [ -z "$ver_in_index" ] && die "索引中找不到包: $name"
+
+    # 已装且版本相同则跳过
+    local cur
+    cur=$(get_installed_version "$name" 2>/dev/null || echo "")
+    if [ "$cur" = "$ver_in_index" ]; then
+        log "$name-$cur 已是最新，跳过"
+        return 0
+    fi
+
+    # hold 检查（显式 install 仍允许，仅提示）
+    if [ -f "$INSTALLED_DIR/$name.hold" ] && [ -n "$cur" ]; then
+        warn "$name 被 hold，仍继续安装（用户显式意图）"
+    fi
+
+    # 取下载信息
+    local url sha filename
+    read -r url sha filename <<< "$(python3 -c "
+import json
+idx=json.load(open('$INDEX_FILE'))
+for p in idx['packages']:
+    if p['name']=='$name':
+        print(p['download_url'], p['sha256'], p['filename']); break
+")"
+    [ -z "$url" ] && die "无法获取 $name 的下载信息"
+
+    mkdir -p "$CACHE_DIR"
+    local tarball="$CACHE_DIR/$filename"
+
+    # 下载（带镜像重试）
+    if [ -f "$tarball" ] && sha256_matches "$tarball" "$sha"; then
+        log "$name: 缓存命中 $filename"
+    else
+        log "$name: 下载 $filename ..."
+        http_get_with_retry "$url" "$tarball"
+    fi
+
+    # sha256 校验
+    if ! sha256_matches "$tarball" "$sha"; then
+        die "$name sha256 校验失败: $filename"
+    fi
+
+    # 安装前扫描 $PREFIX diff（记录新增文件）
+    # 临时文件放 /tmp 避免被自身 find 扫到（$CACHE_DIR 在 $PREFIX 下）
+    local before_list="/tmp/.apt-before-$$"
+    ( cd "$PREFIX" && find . -type f -o -type l 2>/dev/null | sort ) > "$before_list"
+
+    # 解压到临时目录后原子复制到 $PREFIX
+    log "$name: 解压到 $PREFIX ..."
+    local tmp="/tmp/.apt-extract-$$"
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    tar -xzf "$tarball" -C "$tmp" || { rm -rf "$tmp" "$before_list"; die "$name 解压失败"; }
+
+    # 重建符号链接（从索引获取 symlinks 清单）
+    local symlinks_json
+    symlinks_json=$(python3 -c "
+import json
+idx=json.load(open('$INDEX_FILE'))
+for p in idx['packages']:
+    if p['name']=='$name':
+        for s in p.get('symlinks', []):
+            print(s['link'] + '\t' + s['target'])
+")
+    if [ -n "$symlinks_json" ]; then
+        while IFS=$'\t' read -r link target; do
+            [ -z "$link" ] && continue
+            local link_path="$PREFIX/$link"
+            mkdir -p "$(dirname "$link_path")"
+            ln -sfn "$target" "$link_path"
+        done <<< "$symlinks_json"
+    fi
+
+    # 复制文件到 $PREFIX（保留权限）
+    ( cd "$tmp" && tar cf - . ) | ( cd "$PREFIX" && tar xf - )
+    rm -rf "$tmp"
+
+    # 安装后扫描 diff，记录文件清单
+    local after_list="/tmp/.apt-after-$$"
+    ( cd "$PREFIX" && find . -type f -o -type l 2>/dev/null | sort ) > "$after_list"
+    local files_list="$INSTALLED_DIR/$name.files"
+    mkdir -p "$INSTALLED_DIR"
+    comm -13 "$before_list" "$after_list" | sed 's|^\./||' > "$files_list"
+    rm -f "$before_list" "$after_list"
+
+    # 写版本号
+    echo "$ver_in_index" > "$INSTALLED_DIR/$name"
+
+    local nfiles
+    nfiles=$(wc -l < "$files_list" | tr -d ' ')
+    log "✓ $name-$ver_in_index 已安装（$nfiles 个文件）"
+}
+
+get_installed_version() {
+    local name="$1"
+    [ -f "$INSTALLED_DIR/$name" ] || return 0
+    cat "$INSTALLED_DIR/$name"
+}
+
+sha256_matches() {
+    local file="$1" expected="$2"
+    local actual
+    actual=$(sha256sum "$file" | awk '{print $1}')
+    [ "$actual" = "$expected" ]
+}
+
+# ------------------------------------------------------------------
+# apt remove —— 卸载包（按引用计数）
+# ------------------------------------------------------------------
+cmd_remove() {
+    require_bootstrap_tools
+    [ $# -eq 0 ] && die "用法: apt remove <包名>..."
+    local name
+    for name in "$@"; do
+        uninstall_one "$name"
+    done
+}
+
+uninstall_one() {
+    local name="$1"
+    local ver
+    ver=$(get_installed_version "$name")
+    [ -z "$ver" ] && { warn "$name 未安装，跳过"; return 0; }
+
+    local files_list="$INSTALLED_DIR/$name.files"
+    [ -f "$files_list" ] || { warn "$name 无文件清单，仅清版本标记"; }
+
+    # 构建全局引用计数：遍历所有 *.files
+    local ref_count="$CACHE_DIR/.refcount-$$"
+    : > "$ref_count"
+    local lf
+    for lf in "$INSTALLED_DIR"/*.files; do
+        [ -f "$lf" ] || continue
+        cat "$lf" >> "$ref_count"
+    done
+
+    # 计数每个路径被引用次数
+    local counts="$CACHE_DIR/.counts-$$"
+    sort "$ref_count" | uniq -c > "$counts"
+    rm -f "$ref_count"
+
+    local deleted=0 skipped=0
+    # 逆序删除（先文件后目录）
+    local rel
+    while IFS= read -r rel; do
+        [ -z "$rel" ] && continue
+        # 查引用计数
+        local cnt
+        cnt=$(grep -E "^[[:space:]]*[0-9]+ ${rel//\//\\/}\$" "$counts" 2>/dev/null | awk '{print $1}' | head -1)
+        cnt=${cnt:-0}
+        if [ "$cnt" -gt 1 ]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+        local f="$PREFIX/$rel"
+        if [ -e "$f" ] || [ -L "$f" ]; then
+            if rm -f "$f" 2>/dev/null; then
+                deleted=$((deleted + 1))
+            fi
+        fi
+    done < <(tac "$files_list" 2>/dev/null)
+    rm -f "$counts"
+
+    # 清理空目录
+    cleanup_empty_dirs "$files_list"
+
+    # 删除清单、版本标记、hold
+    rm -f "$files_list" "$INSTALLED_DIR/$name.hold" "$INSTALLED_DIR/$name"
+
+    log "✓ $name-$ver 已卸载（删除 $deleted 个文件，跳过 $skipped 个共享文件）"
+}
+
+cleanup_empty_dirs() {
+    local files_list="$1"
+    [ -f "$files_list" ] || return 0
+    # 收集所有目录（清单中文件/链接的父目录）
+    local dirs="$CACHE_DIR/.dirs-$$"
+    : > "$dirs"
+    local rel parent
+    while IFS= read -r rel; do
+        [ -z "$rel" ] && continue
+        parent=$(dirname "$rel")
+        while [ "$parent" != "." ] && [ -n "$parent" ]; do
+            echo "$parent" >> "$dirs"
+            parent=$(dirname "$parent")
+        done
+    done < "$files_list"
+    # 深度优先删空目录
+    sort -u "$dirs" | tac | while IFS= read -r d; do
+        local path="$PREFIX/$d"
+        if [ -d "$path" ]; then
+            rmdir "$path" 2>/dev/null || true
+        fi
+    done
+    rm -f "$dirs"
+}
+
+# ------------------------------------------------------------------
+# apt upgrade —— 升级
+# ------------------------------------------------------------------
+cmd_upgrade() {
+    require_bootstrap_tools
+    ensure_index
+    if [ $# -gt 0 ]; then
+        # apt upgrade <pkg>...
+        local p
+        for p in "$@"; do
+            local cur target
+            cur=$(get_installed_version "$p")
+            target=$(python3 -c "
+import json
+idx=json.load(open('$INDEX_FILE'))
+for x in idx['packages']:
+    if x['name']=='$p': print(x['version']); break
+" 2>/dev/null)
+            if [ -z "$target" ]; then
+                warn "$p 不在索引中，跳过"; continue
+            fi
+            if [ "$cur" = "$target" ]; then
+                log "$p 已是最新 ($cur)"; continue
+            fi
+            if [ -f "$INSTALLED_DIR/$p.hold" ]; then
+                warn "$p 被 hold，跳过（如需升级请 apt unhold $p）"; continue
+            fi
+            install_one "$p"
+        done
+        return
+    fi
+
+    # apt upgrade（无参数）：升级所有可升级（跳过 held）
+    log "检查可升级包..."
+    local upgradable
+    upgradable=$(list_upgradable)
+    if [ -z "$upgradable" ]; then
+        log "所有包均为最新"
+        return 0
+    fi
+    echo "$upgradable"
+    echo
+    read -r -p "升级以上 $(echo "$upgradable" | wc -l | tr -d ' ') 个包？[y/N] " ans
+    case "$ans" in
+        y|Y) ;;
+        *) log "已取消"; return 0 ;;
+    esac
+    local name
+    while IFS='/' read -r name _; do
+        install_one "$name"
+    done <<< "$upgradable"
+    log "✓ 升级完成"
+}
+
+# ------------------------------------------------------------------
+# apt hold / unhold —— 版本锁定
+# ------------------------------------------------------------------
+cmd_hold() {
+    [ $# -eq 0 ] && die "用法: apt hold <包名>..."
+    local name
+    for name in "$@"; do
+        if [ -z "$(get_installed_version "$name")" ]; then
+            warn "$name 未安装，无法 hold"; continue
+        fi
+        mkdir -p "$INSTALLED_DIR"
+        echo "1" > "$INSTALLED_DIR/$name.hold"
+        log "$name 已锁定（不参与 upgrade）"
+    done
+}
+
+cmd_unhold() {
+    [ $# -eq 0 ] && die "用法: apt unhold <包名>..."
+    local name
+    for name in "$@"; do
+        if [ -f "$INSTALLED_DIR/$name.hold" ]; then
+            rm -f "$INSTALLED_DIR/$name.hold"
+            log "$name 已解除锁定"
+        else
+            warn "$name 未被 hold"
+        fi
+    done
+}
+
+# ------------------------------------------------------------------
+# apt mirror —— 镜像管理
+# ------------------------------------------------------------------
+cmd_mirror() {
+    local sub="${1:-list}"
+    case "$sub" in
+        list)
+            local cur
+            cur=$(get_mirror_index)
+            local i=0
+            for label in "${MIRROR_LABELS[@]}"; do
+                local mark=""
+                [ "$i" = "$cur" ] && mark=" *"
+                printf "[%d] %s%s\n" "$i" "$label" "$mark"
+                i=$((i + 1))
+            done
+            ;;
+        set)
+            shift
+            local idx="${1:-}"
+            [ -z "$idx" ] && die "用法: apt mirror set <索引>"
+            case "$idx" in
+                ''|*[!0-9]*) die "索引必须为数字" ;;
+            esac
+            [ "$idx" -lt 0 ] 2>/dev/null && die "索引越界"
+            [ "$idx" -ge "${#MIRROR_PREFIXES[@]}" ] && die "索引越界（0-${#MIRROR_PREFIXES[@]})"
+            set_mirror_index "$idx"
+            log "镜像已切换为: ${MIRROR_LABELS[$idx]}"
+            ;;
+        *)
+            die "用法: apt mirror [list|set <索引>]"
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------
+# apt pip —— Python wheel 安装（走 wheels-index 优先，回退 pip）
+# ------------------------------------------------------------------
+cmd_pip() {
+    local sub="${1:-}"
+    [ -z "$sub" ] && die "用法: apt pip install <包名>..."
+    case "$sub" in
+        install)
+            shift
+            [ $# -eq 0 ] && die "用法: apt pip install <包名>..."
+            local p
+            for p in "$@"; do
+                install_python_wheel "$p"
+            done
+            ;;
+        *)
+            die "未知子命令: apt pip $sub（仅支持 install）"
+            ;;
+    esac
+}
+
+# 安装 Python 包：优先命中预编译 wheel，否则降级 pip install（PyPI）
+install_python_wheel() {
+    require_bootstrap_tools
+    local pkg="$1"
+
+    # 未拉取 wheel 索引则先拉
+    if [ ! -f "$WHEELS_INDEX_FILE" ]; then
+        log "wheel 索引不存在，先 apt update"
+        cmd_update || true
+    fi
+
+    if [ -f "$WHEELS_INDEX_FILE" ]; then
+        # 在 wheels-index.json 中查找匹配
+        local match
+        match=$(python3 - "$WHEELS_INDEX_FILE" "$pkg" <<'PY'
+import json, sys
+idx = json.load(open(sys.argv[1]))
+target = sys.argv[2].lower()
+for w in idx.get('wheels', []):
+    if w['name'].lower() == target:
+        print(w['filename'] + '|' + w['download_url'] + '|' + w.get('sha256','') + '|' + str(w.get('size',0)))
+        break
+PY
+)
+        if [ -n "$match" ]; then
+            local filename url sha size
+            IFS='|' read -r filename url sha size <<< "$match"
+            log "$pkg: 命中预编译 wheel $filename"
+            install_wheel "$pkg" "$filename" "$url" "$sha"
+            return $?
+        fi
+    fi
+
+    # 未命中：降级 pip install（PyPI）
+    warn "$pkg: 仓库无预编译 wheel，降级 pip install（PyPI）"
+    local pip_bin="$PREFIX/bin/pip"
+    [ -x "$pip_bin" ] || pip_bin="$PREFIX/bin/pip3.13"
+    [ -x "$pip_bin" ] || die "pip 不存在（请检查 python 包是否已安装）"
+    log "pip install $pkg ..."
+    if "$pip_bin" install "$pkg"; then
+        log "✓ $pkg 已通过 pip 安装"
+    else
+        die "pip install $pkg 失败"
+    fi
+}
+
+# 安装本地 wheel：下载 → sha256 校验 → pip install <local.whl> --no-index --no-deps
+install_wheel() {
+    local pkg="$1" filename="$2" url="$3" sha="$4"
+    mkdir -p "$WHEEL_CACHE_DIR"
+    local wheel="$WHEEL_CACHE_DIR/$filename"
+
+    # 缓存命中则跳过下载
+    if [ -f "$wheel" ] && [ -n "$sha" ] && sha256_matches "$wheel" "$sha"; then
+        log "$pkg: wheel 已缓存，跳过下载"
+    else
+        log "$pkg: 下载 wheel $filename ..."
+        http_get_with_retry "$url" "$wheel"
+    fi
+
+    # sha256 校验
+    if [ -n "$sha" ] && ! sha256_matches "$wheel" "$sha"; then
+        die "$pkg wheel sha256 校验失败: $filename"
+    fi
+
+    # 调用设备端 pip 安装本地 wheel
+    # --no-index 避免误从 PyPI 拉其他版本
+    # --no-deps 避免依赖解析（依赖需用户单独装或本已在 bootstrap）
+    local pip_bin="$PREFIX/bin/pip"
+    [ -x "$pip_bin" ] || pip_bin="$PREFIX/bin/pip3.13"
+    log "$pkg: pip install --no-index --no-deps $filename"
+    if "$pip_bin" install --no-index --no-deps "$wheel"; then
+        log "✓ $pkg wheel 已安装: $filename"
+    else
+        die "$pkg wheel 安装失败"
+    fi
+}
+
+# ------------------------------------------------------------------
+# apt info —— 综合信息（已装包数量、索引大小、缓存占用）
+# ------------------------------------------------------------------
+cmd_info() {
+    echo "haisa-des apt 1.0"
+    echo
+    echo "PREFIX:        $PREFIX"
+    echo "索引文件:      $INDEX_FILE"
+    echo "已装记录目录:  $INSTALLED_DIR"
+    echo "缓存目录:      $CACHE_DIR"
+    echo "镜像:          ${MIRROR_LABELS[$(get_mirror_index)]}"
+    echo
+    if [ -f "$INDEX_FILE" ]; then
+        local count
+        count=$(python3 -c "import json;print(len(json.load(open('$INDEX_FILE'))['packages']))" 2>/dev/null || echo "?")
+        echo "索引包数量:    $count"
+    else
+        echo "索引包数量:    未拉取（请 apt update）"
+    fi
+    if [ -d "$INSTALLED_DIR" ]; then
+        local n=0
+        for f in "$INSTALLED_DIR"/*; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in
+                *.files|*.hold|*.desc) continue ;;
+            esac
+            n=$((n + 1))
+        done
+        echo "已装包数量:    $n"
+    fi
+    if [ -d "$CACHE_DIR" ]; then
+        local sz
+        sz=$(du -sh "$CACHE_DIR" 2>/dev/null | awk '{print $1}')
+        echo "缓存占用:      $sz"
+    fi
+}
+
+# ------------------------------------------------------------------
+# 帮助
+# ------------------------------------------------------------------
+cmd_help() {
+    cat <<'EOF'
+haisa-des apt 1.0 —— 包管理器（Debian apt 风格）
+
+用法:
+  apt <命令> [参数]
+
+包管理:
+  apt update                   拉取包索引和 wheel 索引
+  apt install <包名>...        安装包（自动解析依赖）
+  apt remove <包名>...         卸载包（按引用计数，保留共享库）
+  apt upgrade [<包名>...]      升级所有可升级包 / 指定包
+  apt hold <包名>...           锁定包版本（不参与 upgrade）
+  apt unhold <包名>...         解除锁定
+
+查询:
+  apt list [--installed|--upgradable]   列出包
+  apt search <关键字>                    搜索包
+  apt show <包名>                       显示包详情
+  apt info                              显示 apt 配置和统计
+
+Python 包:
+  apt pip install <包名>...     安装 Python 包（优先仓库预编译 wheel，
+                                未命中则降级 pip install 从 PyPI）
+
+镜像:
+  apt mirror list              列出可用镜像
+  apt mirror set <索引>        切换镜像
+
+示例:
+  apt update && apt install python
+  apt install numpy pillow
+  apt pip install pygame
+  apt upgrade
+  apt hold python
+
+仓库: https://github.com/XION-HN/haisa-des-repo
+EOF
+}
+
+# ------------------------------------------------------------------
+# 命令分发
+# ------------------------------------------------------------------
+main() {
+    [ $# -eq 0 ] && { cmd_help; exit 0; }
+    local cmd="$1"; shift
+    case "$cmd" in
+        update)        cmd_update "$@" ;;
+        install)       cmd_install "$@" ;;
+        remove|purge)  cmd_remove "$@" ;;
+        upgrade)       cmd_upgrade "$@" ;;
+        hold)          cmd_hold "$@" ;;
+        unhold)        cmd_unhold "$@" ;;
+        list)          cmd_list "$@" ;;
+        search)        cmd_search "$@" ;;
+        show|info-pkg) cmd_show "$@" ;;
+        mirror)        cmd_mirror "$@" ;;
+        pip)           cmd_pip "$@" ;;
+        info)          cmd_info ;;
+        help|--help|-h) cmd_help ;;
+        *)             err "未知命令: $cmd"; echo; cmd_help; exit 1 ;;
+    esac
+}
+
+main "$@"

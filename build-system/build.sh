@@ -17,9 +17,12 @@ source "$BS_ROOT/lib/common.sh"
 # 包名列表（构建顺序即依赖顺序）
 # M3.1 扩展：SDL2 系列 7 包（libpng/libjpeg-turbo/freetype/SDL2/image/mixer/ttf）
 # 用于支持设备端 pip 安装 pygame 等图形库 wheel（无需 gcc）
+# M3.2 扩展：apt 命令行（包管理器 CLI，Debian apt 风格）
+# M3.3 扩展：pip wrapper（接管 pip 命令，优先查本地 wheel 索引）
 ALL_PACKAGES="zlib ncurses bash openssl ca-certificates curl toybox \
               libffi sqlite bzip2 xz expat readline python \
-              libpng libjpeg-turbo freetype sdl2 sdl2_image sdl2_mixer sdl2_ttf"
+              libpng libjpeg-turbo freetype sdl2 sdl2_image sdl2_mixer sdl2_ttf \
+              apt pip"
 
 pkg_deps() {
     case "$1" in
@@ -45,6 +48,10 @@ pkg_deps() {
         sdl2_image)      echo "sdl2 libpng libjpeg-turbo" ;;
         sdl2_mixer)      echo "sdl2" ;;
         sdl2_ttf)        echo "sdl2 freetype" ;;
+        # ---- M3.2 apt CLI（运行时依赖 bash/curl/tar/sha256sum/python，构建时无依赖）----
+        apt)             echo "" ;;
+        # ---- M3.3 pip wrapper（必须在 python 之后装；构建时依赖 python 提供的原版 pip）----
+        pip)             echo "python" ;;
         *) die "未知包: $1" ;;
     esac
 }
