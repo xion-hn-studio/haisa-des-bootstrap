@@ -52,36 +52,23 @@ jobs:
           # 而后续 pygame wheel 构建需要 staging python3 可执行。make-bootstrap 移到
           # pygame wheel 之后作为最终打包步骤。
 
-      # pygame wheel 用 source 方法交叉编译，需 staging 中的 SDL2 系列 + Python，
-      # 并通过 QEMU binfmt 让 staging 的 aarch64 python3 可在 x86_64 host 运行。
-      # 仅 prod 变体构建（test 变体的 staging prefix 不同，pygame 不需要 Termux 冒烟）。
-      - name: Setup QEMU binfmt for pygame wheel (prod only)
-        if: matrix.variant == 'prod'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Build pygame wheel (prod only)
+      # pygame wheel 暂不在此构建：source 方法需运行 staging 的 aarch64 python3，
+      # 但 QEMU 无法运行 Android 动态链接二进制（缺 /system/bin/linker64 + bionic
+      # runtime，NDK 仅提供 stub libc.so 用于链接）。pygame wheel 改为设备端
+      # 预构建后作为 release asset 上传，CI 只构建 numpy/Pillow/lxml。
+      # numpy/Pillow/lxml 用 download 方法（从 PyPI 拉 aarch64 manywheel，纯下载）。
+      - name: Build wheels (download method, prod only)
         if: matrix.variant == 'prod'
         env:
           VARIANT: prod
-          JOBS: 4
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
           cd build-system
-          # pygame 用 source 方法交叉编译（需 staging SDL2 + QEMU binfmt）
-          # numpy/Pillow/lxml 用 download 方法，CI 此时已 build all，
-          # staging 的 python3 可用（但 download 方法不依赖 staging）。
-          # 在 prod job 统一构建全部 4 个 wheel，wheels job 不再重复。
-          ./wheels/build-wheels.sh build pygame
-          # numpy/Pillow/lxml 走 download 方法（快，纯下载）
           ./wheels/build-wheels.sh build numpy Pillow lxml
           ./make-wheels-index.sh
 
       # make-bootstrap 是最终打包步骤：会删除 staging 符号链接，必须在所有需要
-      # staging 完整性的构建（pygame wheel）之后。test variant 无 pygame 步骤，
-      # 直接在此打包。
+      # staging 完整性的构建之后。test variant 直接在此打包。
       - name: Make bootstrap
         env:
           VARIANT: ${{ matrix.variant }}
