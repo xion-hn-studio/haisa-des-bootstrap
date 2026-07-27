@@ -2,7 +2,7 @@
 PKG_NAME="sdl2_image"
 PKG_VERSION="2.8.2"
 PKG_SRC_URL="https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.2/SDL2_image-2.8.2.tar.gz"
-PKG_SRC_SHA256="84902edfdf4971f1e93d70b0c66a73a0d77938345f0b1be8093ab5223220232c"
+PKG_SRC_SHA256=""
 PKG_SRC_DIR="SDL2_image-2.8.2"
 
 pkg_build() {
