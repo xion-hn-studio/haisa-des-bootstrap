@@ -6,20 +6,37 @@ die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # fetch_pkg <name> <url> <sha256>
 # 下载源码到 CACHE_DIR 并校验 sha256；幂等。
+# url 支持 local://<相对路径> 形式：从 $BS_ROOT 下相对路径读取，
+# 避免因外部下载不稳定把源码 vendor 进仓库（如 pygame release 无 tarball 时）。
 fetch_pkg() {
     local name="$1" url="$2" sha="$3"
     local file="$CACHE_DIR/${url##*/}"
     mkdir -p "$CACHE_DIR"
-    if [ -f "$file" ]; then
-        if [ -n "$sha" ] && echo "$sha  $file" | sha256sum -c - >/dev/null 2>&1; then
+
+    # local:// 从仓库内拷贝，跳过 curl
+    if [[ "$url" == local://* ]]; then
+        local rel="${url#local://}"
+        local src="$BS_ROOT/$rel"
+        [ -f "$src" ] || die "$name: 本地源码不存在: $src"
+        # 缓存命中且校验通过则跳过拷贝
+        if [ -f "$file" ] && [ -n "$sha" ] && echo "$sha  $file" | sha256sum -c - >/dev/null 2>&1; then
             log "$name: 缓存命中 ${url##*/}"
             return 0
         fi
-        warn "$name: 缓存校验失败，重新下载"
-        rm -f "$file"
+        log "$name: 从仓库内拷贝 $rel"
+        cp -f "$src" "$file"
+    else
+        if [ -f "$file" ]; then
+            if [ -n "$sha" ] && echo "$sha  $file" | sha256sum -c - >/dev/null 2>&1; then
+                log "$name: 缓存命中 ${url##*/}"
+                return 0
+            fi
+            warn "$name: 缓存校验失败，重新下载"
+            rm -f "$file"
+        fi
+        log "$name: 下载 $url"
+        curl -fSL --retry 3 --connect-timeout 30 -o "$file" "$url" || die "$name 下载失败: $url"
     fi
-    log "$name: 下载 $url"
-    curl -fSL --retry 3 --connect-timeout 30 -o "$file" "$url" || die "$name 下载失败: $url"
     if [ -n "$sha" ]; then
         echo "$sha  $file" | sha256sum -c - >/dev/null 2>&1 || die "$name sha256 校验失败"
     fi

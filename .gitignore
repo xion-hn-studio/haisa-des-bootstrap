@@ -1,4 +1,6 @@
 # build-system 产物
 build-system/dist/
+build-system/.cache/
+build-system/.work/
 **/*.pyc
 __pycache__/
