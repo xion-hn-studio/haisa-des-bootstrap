@@ -20,16 +20,6 @@ rm -f "$OUT"
 find "$SROOT" -name '*.la' -delete 2>/dev/null || true
 mkdir -p "$SROOT/tmp"
 
-# 在删除符号链接之前，从 python 包的 staging 备份原版 pip 入口到 bin/pip.real
-# python 包提供 bin/pip3.13 = 真文件（带 shebang 的 Python 脚本）
-# pip wrapper 包合并后已覆盖 bin/pip 为 wrapper 脚本，且把 bin/pip3.13 改为符号链接 → pip
-# 所以原版真文件只能从 PKG_STAGE_ROOT/python/ 取（合并到总 staging 前的快照）
-if [ ! -e "$SROOT/bin/pip.real" ] && [ -f "$PKG_STAGE_ROOT/python$PREFIX/bin/pip3.13" ]; then
-    cp "$PKG_STAGE_ROOT/python$PREFIX/bin/pip3.13" "$SROOT/bin/pip.real"
-    chmod +x "$SROOT/bin/pip.real"
-    log "已备份原版 pip 入口到 $SROOT/bin/pip.real"
-fi
-
 # 1) 记录并剔除符号链接
 SYMLINKS_TXT="$STAGE_DIR/SYMLINKS.txt"
 : > "$SYMLINKS_TXT"
@@ -63,8 +53,9 @@ PYEOF
 # 3) 每包独立 tar.gz（路径相对 prefix 根，便于手动装包演练: tar -xzf x.tar.gz -C $PREFIX）
 # 内置包（已包含在 bootstrap.zip 内的脚本/工具）：不打单独 tar.gz，也不进 packages.json
 # - apt: 包管理器 CLI，依赖 bootstrap 已有命令；发布到 Releases 反而是冗余
-# - pip: wrapper 脚本，接管 pip 命令优先查本地 wheel 索引；原版 pip 在此重命名为 pip.real
-BUILTIN_PACKAGES="apt pip"
+# python 不在内置列表 → python 会打成 tar.gz + 进 packages.json
+# pip wrapper 已合并到 python 包内，随 python 一起安装
+BUILTIN_PACKAGES="apt"
 
 for stage in "$PKG_STAGE_ROOT"/*/; do
     name="$(basename "$stage")"

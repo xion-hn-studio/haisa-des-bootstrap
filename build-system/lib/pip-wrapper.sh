@@ -1,17 +1,17 @@
 #!/data/data/com.haisades/files/usr/bin/bash
-# pip wrapper —— haisa-des 的 pip 接管层
+# pip wrapper —— haisa-des pip 接管层
 #
-# 设计原则（参考 Termux pip 架构）：
+# 设计原则：
 #   1. 优先查本地 wheels-index.json（命中预编译 wheel → 下载 → sha256 校验 → pip install <local.whl> --no-index --no-deps）
-#   2. 版本匹配：能匹配本地版本就用本地；版本不符回退 PyPI（用户优先拿本地，没本地才上网）
+#   2. 版本匹配：能匹配本地版本就用本地；版本不符直接报错（不回退 PyPI）
 #   3. 依赖拓扑展开：本地 wheel 命中后，递归查 depends 字段，把依赖也优先从本地装
-#   4. 未命中本地索引 / 未拦截的命令：透明传递给原版 pip（pip.real）
-#   5. 不修改 pip 的其他子命令（uninstall/list/show/freeze/install -U 等）
+#   4. 未命中本地索引 → 直接报错（haisa-des 仓库无此包）
+#   5. 未拦截的子命令（list/show/uninstall/freeze/install -r 等）→ 透传给原版 pip.real
 #
-# 与 apt 的关系：
-#   - apt 命令管原生包（apt install python 装解释器）
-#   - pip 命令管 Python 包（pip install numpy 装 Python 模块）
-#   - 二者共用 wheels-index.json，但 apt 不接管 pip
+# 依赖：
+#   - python3（解析 wheels-index.json 和 PEP 440 版本约束）
+#   - curl / sha256sum / tar
+#   需先 apt install python 才能用 pip
 set -euo pipefail
 
 # ------------------------------------------------------------------
@@ -24,7 +24,7 @@ WHEEL_CACHE_DIR="$CACHE_DIR/wheel-cache"
 WHEELS_INDEX_FILE="$CACHE_DIR/wheels-index.json"
 STATE_DIR="$PREFIX/var/pkg"
 
-# 镜像表（与 apt 一致）
+# 镜像表（与 apt 共享 MIRROR_FILE）
 MIRROR_PREFIXES=(
     ""
     "https://ghproxy.com/"
@@ -38,9 +38,8 @@ RELEASE_REPO_OWNER="XION-HN"
 RELEASE_REPO_NAME="haisa-des-repo"
 GITHUB_BASE="https://github.com/${RELEASE_REPO_OWNER}/${RELEASE_REPO_NAME}"
 
-# 原版 pip 路径（pip wrapper 安装时把原版改名 pip.real）
+# 原版 pip（python 包安装时同时生成 pip.real）
 REAL_PIP="$PREFIX/bin/pip.real"
-[ -x "$REAL_PIP" ] || REAL_PIP="$PREFIX/bin/pip3.13.real"
 
 # ------------------------------------------------------------------
 # 基础工具
@@ -50,18 +49,8 @@ warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
-need_cmd() {
-    command -v "$1" >/dev/null 2>&1 || die "缺少命令: $1（请先安装 bootstrap）"
-}
-require_bootstrap_tools() {
-    need_cmd curl
-    need_cmd tar
-    need_cmd sha256sum
-    need_cmd python3
-}
-
 # ------------------------------------------------------------------
-# 镜像管理（与 apt 共享 MIRROR_FILE，行为一致）
+# 镜像管理（与 apt 共享 MIRROR_FILE）
 # ------------------------------------------------------------------
 get_mirror_index() {
     [ -f "$MIRROR_FILE" ] && cat "$MIRROR_FILE" 2>/dev/null || echo "$DEFAULT_MIRROR_INDEX"
@@ -109,61 +98,38 @@ http_get_with_retry() {
 
 sha256_matches() {
     local file="$1" expected="$2"
-    [ -z "$expected" ] && return 0  # 无 sha 视为匹配（向后兼容）
+    [ -z "$expected" ] && return 0
     local actual
     actual=$(sha256sum "$file" | awk '{print $1}')
     [ "$actual" = "$expected" ]
 }
 
-# 确保本地有 wheels-index.json；无则先从 Releases 拉
+# 确保本地有 wheels-index.json；无则从 Releases 拉
 ensure_wheels_index() {
     [ -f "$WHEELS_INDEX_FILE" ] && return 0
-    require_bootstrap_tools
     mkdir -p "$CACHE_DIR"
     log "本地无 wheel 索引，从 Releases 拉取..."
     local url="$GITHUB_BASE/releases/latest/download/wheels-index.json"
-    http_get_with_retry "$url" "$WHEELS_INDEX_FILE" || {
-        warn "wheel 索引拉取失败，将回退到原版 pip 走 PyPI"
-        return 1
-    }
+    http_get_with_retry "$url" "$WHEELS_INDEX_FILE" || die "wheel 索引拉取失败"
     return 0
 }
 
 # ------------------------------------------------------------------
 # 命令行解析：从 pip install <args> 提取要装的包列表
 # ------------------------------------------------------------------
-# pip install 支持的参数形式：
-#   pip install numpy
-#   pip install numpy==2.1.0
-#   pip install numpy>=1.20
-#   pip install numpy>=1.20,<2.0
-#   pip install -r requirements.txt
-#   pip install ./local/path/
-#   pip install ./local/path-1.0.whl
-#   pip install https://example.com/pkg.whl
-#   pip install -e ./editable/path/
-#   pip install --upgrade numpy
-#   pip install --no-deps numpy
-#
-# 本 wrapper 仅拦截"包名+可选版本约束"的形式；其他形式（URL/路径/-r/-e）直接透传给原版 pip
-
-# 解析 pip install 参数，返回 PEP 440 形式的包规格列表
-# 输出格式：每行一个 spec，如 "numpy" 或 "numpy==2.1.0" 或 "numpy>=1.20,<2.0"
-# 如果参数中有非包规格（URL/路径/选项），返回 1 让调用方回退到原版 pip
+# 仅拦截"包名+可选版本约束"的形式；其他形式（URL/路径/-r/-e）直接透传给原版 pip
 parse_install_args() {
     local specs=()
     local has_non_spec=0
     local skip_next=0
     local arg
     for arg in "$@"; do
-        # 选项参数（以 - 开头）：跳过本参数，且若是带值的选项，下一个也跳过
         if [ "$skip_next" = "1" ]; then
             skip_next=0
             continue
         fi
         case "$arg" in
             -*) # 选项
-                # 带值的选项（下一个参数是值，不是包名）
                 case "$arg" in
                     -r|--requirement|-c|--constraint|-e|--editable|-t|--target|\
                     -i|--index-url|--extra-index-url|-f|--find-links|\
@@ -173,7 +139,6 @@ parse_install_args() {
                         skip_next=1
                         ;;
                 esac
-                # -r requirements.txt / -e ./path / -i URL 这些都意味着回退原版 pip
                 case "$arg" in
                     -r|--requirement|-c|--constraint|-e|--editable|\
                     -i|--index-url|--extra-index-url|-f|--find-links|\
@@ -184,18 +149,14 @@ parse_install_args() {
                 continue
                 ;;
             *)
-                # 非选项参数：可能是包规格/URL/路径
-                # URL 或本地路径 → 回退原版 pip
                 case "$arg" in
                     http://*|https://*|ftp://*)
                         has_non_spec=1
                         ;;
                     ./*|/*|~/*)
-                        # 本地路径（目录或 wheel 文件）
                         has_non_spec=1
                         ;;
                     *)
-                        # 看起来像包规格
                         specs+=("$arg")
                         ;;
                 esac
@@ -206,7 +167,6 @@ parse_install_args() {
     [ "$has_non_spec" = "1" ] && return 1
     [ ${#specs[@]} -eq 0 ] && return 1
 
-    # 输出每行一个 spec
     local s
     for s in "${specs[@]}"; do
         echo "$s"
@@ -215,13 +175,8 @@ parse_install_args() {
 }
 
 # ------------------------------------------------------------------
-# 核心逻辑：用 python 实现索引查询、版本约束解析、依赖拓扑展开
+# 核心逻辑：用 python 解析索引、版本约束、依赖拓扑展开
 # ------------------------------------------------------------------
-# 输入：包规格列表（每行一个 "name" 或 "name==1.0" 或 "name>=1.0,<2.0"）
-# 输出：JSON 数组，每个元素 = {name, version, filename, download_url, sha256, from_local: true}
-#       表示可以从本地索引装的包；不在本地的包不输出
-#       若 spec 的 name 在本地索引但版本不满足约束，对应元素为 {name, from_local: false, reason: "version mismatch"}
-#       若 spec 的 name 完全不在本地索引，对应元素为 {name, from_local: false, reason: "not in index"}
 resolve_specs_and_deps() {
     local specs_str="$1"
     python3 - "$WHEELS_INDEX_FILE" "$specs_str" <<'PYEOF'
@@ -235,8 +190,6 @@ with open(index_file) as f:
     idx = json.load(f)
 wheels = {w["name"].lower(): w for w in idx["wheels"]}
 
-# PEP 440 简化解析：从 spec 提取 (name, constraints)
-# 形式：name / name==1.0 / name>=1.0 / name>=1.0,<2.0 / name~=1.0
 def parse_spec(spec):
     m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(.*)$", spec)
     if not m:
@@ -246,18 +199,13 @@ def parse_spec(spec):
     return (name, constraint)
 
 def parse_version(v):
-    """简化版本号解析为元组：1.20.3 → (1, 20, 3)；2.1.0rc1 → (2, 1, 0, 'rc', 1)"""
     parts = []
     for seg in re.split(r"[\.\-]", v):
-        # 数字与非数字分段：1rc1 → [1, 'rc', 1]
         for piece in re.findall(r"\d+|[A-Za-z]+", seg):
             parts.append(int(piece) if piece.isdigit() else piece)
     return tuple(parts)
 
 def version_satisfies(ver, constraint):
-    """检查 version 是否满足 constraint（如 '>=1.20,<2.0'）。
-    支持运算符：==, >=, <=, >, <, ~=（兼容版本，前缀匹配）
-    多约束用逗号分隔（AND 关系）。"""
     if not constraint:
         return True
     ver_tuple = parse_version(ver)
@@ -288,15 +236,12 @@ def version_satisfies(ver, constraint):
             if ver_tuple >= target_tuple:
                 return False
         elif op == "~=":
-            # 兼容版本：~=1.0 等价 >=1.0,<2.0；~=1.4.5 等价 >=1.4.5,<1.5.0
             if len(target_tuple) < 1:
                 continue
             if ver_tuple < target_tuple:
                 return False
-            # 上界：去掉最后一段数字 +1
             upper = list(target_tuple[:-1])
             if upper:
-                # 最后一个数字 +1
                 for i in range(len(upper) - 1, -1, -1):
                     if isinstance(upper[i], int):
                         upper[i] = upper[i] + 1
@@ -305,11 +250,7 @@ def version_satisfies(ver, constraint):
                     return False
     return True
 
-# 依赖拓扑展开：递归把依赖也加入安装列表（被依赖先装）
-# 依赖来自 wheels-index.json 的 depends 字段（PEP 440 字符串列表）
 def expand_deps(name, visited):
-    """返回依赖树展开后的安装顺序列表（被依赖在前）。
-    只返回能在本地索引找到的依赖；找不到的依赖留给 pip install 让 pip 自己处理。"""
     name_norm = name.lower().replace("_", "-")
     if name_norm in visited:
         return []
@@ -320,39 +261,35 @@ def expand_deps(name, visited):
     for dep_spec in wheels[name_norm].get("depends", []):
         dep_name, dep_constraint = parse_spec(dep_spec)
         if dep_name not in wheels:
-            # 本地索引无此依赖，留给原版 pip
-            continue
-        # 检查本地版本是否满足依赖约束
+            # 本地索引无此依赖 → 整个安装失败（不回退 PyPI）
+            raise RuntimeError(f"依赖 {dep_spec} 不在 haisa-des 仓库（pip 不支持 PyPI 回退）")
         dep_w = wheels[dep_name]
         if not version_satisfies(dep_w["version"], dep_constraint):
-            # 本地版本不满足约束，留给原版 pip
-            continue
+            raise RuntimeError(f"依赖 {dep_spec} 本地版本 {dep_w['version']} 不满足约束")
         for d in expand_deps(dep_name, visited):
             if d not in result:
                 result.append(d)
     result.append(name_norm)
     return result
 
-# 1. 解析所有 spec
 parsed = [parse_spec(s) for s in specs]
-
-# 2. 检查每个 spec 是否能在本地装
-local_install = []      # 能从本地装的（已含依赖展开）
-non_local_specs = []     # 不能从本地装的，回退原版 pip
+local_install = []
+missing = []
 visited = set()
 for name, constraint in parsed:
     name_norm = name.lower().replace("_", "-")
     if name_norm not in wheels:
-        non_local_specs.append({"name": name, "spec": f"{name}{constraint}",
-                                 "reason": "not in local index"})
+        missing.append(f"{name}{constraint}")
         continue
     w = wheels[name_norm]
     if constraint and not version_satisfies(w["version"], constraint):
-        non_local_specs.append({"name": name, "spec": f"{name}{constraint}",
-                                 "reason": f"local version {w['version']} doesn't satisfy {constraint}"})
+        missing.append(f"{name}{constraint} (本地版本 {w['version']} 不满足约束)")
         continue
-    # 本地命中：拓扑展开依赖
-    order = expand_deps(name, visited)
+    try:
+        order = expand_deps(name, visited)
+    except RuntimeError as e:
+        print(json.dumps({"error": str(e)}))
+        sys.exit(0)
     for n in order:
         ww = wheels[n]
         local_install.append({
@@ -362,14 +299,9 @@ for name, constraint in parsed:
             "download_url": ww["download_url"],
             "sha256": ww["sha256"],
             "size": ww.get("size", 0),
-            "from_local": True,
         })
 
-# 3. 输出 JSON
-out = {
-    "local": local_install,
-    "non_local": non_local_specs,
-}
+out = {"local": local_install, "missing": missing}
 print(json.dumps(out))
 PYEOF
 }
@@ -382,7 +314,6 @@ download_wheel() {
     mkdir -p "$WHEEL_CACHE_DIR"
     local wheel="$WHEEL_CACHE_DIR/$filename"
 
-    # 缓存命中且 sha 匹配则跳过
     if [ -f "$wheel" ] && sha256_matches "$wheel" "$sha"; then
         log "$filename: 已缓存"
         return 0
@@ -401,103 +332,82 @@ download_wheel() {
 # 主流程：pip install 拦截
 # ------------------------------------------------------------------
 handle_install() {
-    require_bootstrap_tools
+    command -v python3 >/dev/null 2>&1 || die "pip 需要 python3，请先 apt install python"
+    command -v curl >/dev/null 2>&1 || die "pip 需要 curl，应已随 bootstrap 安装"
 
-    # 如果有 -U/--upgrade/-I/--ignore-installed/--force-reinstall 等选项，
-    # 优先透传给原版 pip（避免与本地索引逻辑冲突）
+    # 有 -U/--upgrade 等选项 → 透传给原版 pip
     local arg
     for arg in "$@"; do
         case "$arg" in
             -U|--upgrade|-I|--ignore-installed|--force-reinstall|--reinstall|\
             --no-index|--no-build-isolation|--no-binary|--only-binary)
-                log "检测到 $arg 选项，透传给原版 pip"
+                log "检测到 $arg 选项，透传给原版 pip.real"
                 exec "$REAL_PIP" install "$@"
                 ;;
         esac
     done
 
-    # 解析包规格
     local specs_str
     specs_str=$(parse_install_args "$@") || {
-        log "参数含非包规格（URL/路径/-r/-e），透传给原版 pip"
+        log "参数含非包规格（URL/路径/-r/-e），透传给原版 pip.real"
         exec "$REAL_PIP" install "$@"
     }
 
     [ -z "$specs_str" ] && {
-        log "无包规格可解析，透传给原版 pip"
+        log "无包规格可解析，透传给原版 pip.real"
         exec "$REAL_PIP" install "$@"
     }
 
-    # 确保本地索引存在
-    if ! ensure_wheels_index; then
-        log "无本地 wheel 索引，回退原版 pip"
-        exec "$REAL_PIP" install "$@"
+    ensure_wheels_index
+
+    local resolve_result
+    resolve_result=$(resolve_specs_and_deps "$specs_str")
+
+    # 检查解析错误（如依赖缺失本地）
+    local has_error
+    has_error=$(echo "$resolve_result" | python3 -c "import json,sys; r=json.load(sys.stdin); print('yes' if 'error' in r else 'no')" 2>/dev/null || echo "yes")
+    if [ "$has_error" = "yes" ]; then
+        local err_msg
+        err_msg=$(echo "$resolve_result" | python3 -c "import json,sys; print(json.load(sys.stdin).get('error', '未知错误'))")
+        die "$err_msg"
     fi
 
-    # 解析规格 + 拓扑展开依赖
-    local resolve_result
-    resolve_result=$(resolve_specs_and_deps "$specs_str") || {
-        warn "本地解析失败，回退原版 pip"
-        exec "$REAL_PIP" install "$@"
-    }
-
-    # 提取 local 和 non_local
-    local local_count non_local_count
+    local local_count missing_count
     local_count=$(echo "$resolve_result" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['local']))")
-    non_local_count=$(echo "$resolve_result" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['non_local']))")
+    missing_count=$(echo "$resolve_result" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['missing']))")
 
-    [ "$local_count" = "0" ] && [ "$non_local_count" = "0" ] && {
-        warn "无包可装，透传给原版 pip"
-        exec "$REAL_PIP" install "$@"
-    }
+    # 未命中本地索引 → 直接报错（不回退 PyPI）
+    if [ "$missing_count" -gt 0 ]; then
+        local missing_list
+        missing_list=$(echo "$resolve_result" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+for m in r['missing']:
+    print('  - ' + m)
+")
+        die "以下包不在 haisa-des 仓库（pip 不支持 PyPI 回退，请用 apt install 或联系维护者添加 wheel）:\n$missing_list"
+    fi
 
-    # 1. 装本地命中的包（按拓扑顺序，被依赖先装）
-    if [ "$local_count" -gt 0 ]; then
-        log "从本地仓库装 $local_count 个包（含依赖）"
-        local local_pkgs
-        local_pkgs=$(echo "$resolve_result" | python3 -c "
+    [ "$local_count" = "0" ] && die "无包可装"
+
+    log "从 haisa-des 仓库装 $local_count 个包（含依赖）"
+    local local_pkgs
+    local_pkgs=$(echo "$resolve_result" | python3 -c "
 import json, sys
 r = json.load(sys.stdin)
 for w in r['local']:
     print(w['filename'] + '|' + w['download_url'] + '|' + w['sha256'] + '|' + w['name'])
 ")
-        local line
-        while IFS='|' read -r filename url sha name; do
-            [ -z "$filename" ] && continue
-            download_wheel "$url" "$sha" "$filename"
-            local wheel_path="$WHEEL_CACHE_DIR/$filename"
-            log "pip install --no-index --no-deps $filename"
-            if ! "$REAL_PIP" install --no-index --no-deps "$wheel_path"; then
-                warn "$name 本地 wheel 安装失败，回退原版 pip 走 PyPI"
-                # 把失败的包加入 non_local 让原版 pip 处理
-                non_local_count=$((non_local_count + 1))
-            fi
-        done <<< "$local_pkgs"
-    fi
-
-    # 2. 装未命中本地的包：透传给原版 pip（走 PyPI）
-    if [ "$non_local_count" -gt 0 ]; then
-        log "本地未命中 $non_local_count 个包，回退原版 pip 走 PyPI"
-        # 重新从原参数中提取包规格（保留原 spec 字符串如 ==版本约束）
-        # 用 parse_install_args 的输出做参数（已剔除选项和路径）
-        # 注意：原版 pip 不应该重复装已经本地装好的包
-        # 用 --no-deps 让原版 pip 不重复装依赖（依赖已由本地 wheel 处理）
-        # 但 --no-deps 会让 pip 不装 PyPI 上的依赖 → 折中：依赖由 pip 自行处理
-        # 这里直接调用原版 pip 装非本地包，pip 会自己解析依赖
-        # 但本地已装的包 pip 会跳过（除非 -U）
-        # 输出未命中包名列表给原版 pip
-        local non_local_names
-        non_local_names=$(echo "$resolve_result" | python3 -c "
-import json, sys
-r = json.load(sys.stdin)
-for x in r['non_local']:
-    print(x['spec'])
-")
-        if [ -n "$non_local_names" ]; then
-            # shellcheck disable=SC2086
-            "$REAL_PIP" install $non_local_names
+    local line
+    while IFS='|' read -r filename url sha name; do
+        [ -z "$filename" ] && continue
+        download_wheel "$url" "$sha" "$filename"
+        local wheel_path="$WHEEL_CACHE_DIR/$filename"
+        log "pip.real install --no-index --no-deps $filename"
+        if ! "$REAL_PIP" install --no-index --no-deps "$wheel_path"; then
+            die "$name 本地 wheel 安装失败"
         fi
-    fi
+    done <<< "$local_pkgs"
 
     log "✓ 完成"
 }
@@ -508,16 +418,18 @@ for x in r['non_local']:
 main() {
     [ $# -eq 0 ] && exec "$REAL_PIP"
 
+    # 检查 pip.real 是否存在（python 是否已安装）
+    [ -x "$REAL_PIP" ] || die "pip.real 不存在，请先 apt install python"
+
     local cmd="$1"; shift
     case "$cmd" in
         install)
-            # 仅在装"包名+版本约束"形式时拦截；其他形式透传
             [ $# -eq 0 ] && exec "$REAL_PIP" install
             handle_install "$@"
             ;;
         *)
             # 其他子命令（uninstall/list/show/freeze/download/wheel/hash/help/config）
-            # 透明传递给原版 pip
+            # 透明传递给原版 pip.real
             exec "$REAL_PIP" "$cmd" "$@"
             ;;
     esac

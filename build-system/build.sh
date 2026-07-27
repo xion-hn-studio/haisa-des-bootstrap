@@ -18,11 +18,15 @@ source "$BS_ROOT/lib/common.sh"
 # M3.1 扩展：SDL2 系列 7 包（libpng/libjpeg-turbo/freetype/SDL2/image/mixer/ttf）
 # 用于支持设备端 pip 安装 pygame 等图形库 wheel（无需 gcc）
 # M3.2 扩展：apt 命令行（包管理器 CLI，Debian apt 风格）
-# M3.3 扩展：pip wrapper（接管 pip 命令，优先查本地 wheel 索引）
+# M3.3 扩展：pip wrapper 已合并到 python 包内（python 包 build 时一并安装 wrapper + pip.real）
 ALL_PACKAGES="zlib ncurses bash openssl ca-certificates curl toybox \
               libffi sqlite bzip2 xz expat readline python \
               libpng libjpeg-turbo freetype sdl2 sdl2_image sdl2_mixer sdl2_ttf \
-              apt pip"
+              apt"
+
+# 内置包：打进 bootstrap.zip 的包（不打单独 tar.gz，也不进 packages.json）
+# python 不在内置列表 → python 会打成单独 tar.gz + 进 packages.json，由 apt install python 安装
+BUILTIN_PACKAGES="apt"
 
 pkg_deps() {
     case "$1" in
@@ -39,6 +43,7 @@ pkg_deps() {
         xz)              echo "" ;;
         expat)           echo "" ;;
         readline)        echo "ncurses" ;;
+        # python 拓扑依赖：bootstrap 已含的运行时库（用户 apt install python 时按需装缺失的）
         python)          echo "zlib openssl ncurses readline libffi sqlite bzip2 xz expat" ;;
         # ---- M3.1 SDL2 系列 ----
         libpng)          echo "zlib" ;;
@@ -50,8 +55,6 @@ pkg_deps() {
         sdl2_ttf)        echo "sdl2 freetype" ;;
         # ---- M3.2 apt CLI（运行时依赖 bash/curl/tar/sha256sum/python，构建时无依赖）----
         apt)             echo "" ;;
-        # ---- M3.3 pip wrapper（必须在 python 之后装；构建时依赖 python 提供的原版 pip）----
-        pip)             echo "python" ;;
         *) die "未知包: $1" ;;
     esac
 }

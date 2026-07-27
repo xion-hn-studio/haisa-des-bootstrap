@@ -174,16 +174,19 @@ ensure_wheels_index() {
 # ------------------------------------------------------------------
 cmd_list() {
     require_bootstrap_tools
-    ensure_index
     local filter="${1:-}"
     case "$filter" in
         --installed)
+            # --installed 直接从 INSTALLED_DIR 读取，不需要 packages.json 索引
+            # （本地 tar.gz 安装的包不在索引里，但仍应可见）
             list_installed
             ;;
         --upgradable)
+            ensure_index
             list_upgradable
             ;;
         "")
+            ensure_index
             python3 - "$INDEX_FILE" "$INSTALLED_DIR" <<'PY'
 import json, sys, os
 idx = json.load(open(sys.argv[1]))
@@ -280,9 +283,26 @@ PY
 # ------------------------------------------------------------------
 cmd_show() {
     require_bootstrap_tools
-    ensure_index
     [ $# -eq 0 ] && die "用法: apt show <包名>"
     local name="$1"
+    # 先查索引；索引不存在或包不在索引里，降级到只查本地已装状态
+    if [ ! -f "$INDEX_FILE" ]; then
+        # 无索引：仅显示本地已装信息（适用于本地 tar.gz 安装的包）
+        if [ -f "$INSTALLED_DIR/$name" ]; then
+            local ver
+            ver=$(cat "$INSTALLED_DIR/$name")
+            echo "Package: $name"
+            echo "Version: $ver"
+            echo "Source: 本地 tarball 安装（不在仓库索引中）"
+            local nfiles=0
+            [ -f "$INSTALLED_DIR/$name.files" ] && nfiles=$(wc -l < "$INSTALLED_DIR/$name.files" | tr -d ' ')
+            echo "Files: $nfiles"
+            [ -f "$INSTALLED_DIR/$name.hold" ] && echo "Hold: yes"
+        else
+            die "未找到包: $name（且无索引可用，先 apt update）"
+        fi
+        return 0
+    fi
     python3 - "$INDEX_FILE" "$INSTALLED_DIR" "$name" <<'PY'
 import json, sys, os
 idx = json.load(open(sys.argv[1]))
@@ -293,6 +313,20 @@ for p in idx['packages']:
     if p['name'] == name:
         found = p; break
 if not found:
+    # 索引中无此包，但可能已通过本地 tar.gz 安装
+    ver_file = os.path.join(inst_dir, name)
+    if os.path.exists(ver_file):
+        with open(ver_file) as f: v = f.read().strip()
+        print(f"Package: {name}")
+        print(f"Version: {v}")
+        print(f"Source: 本地 tarball 安装（不在仓库索引中）")
+        files_file = os.path.join(inst_dir, name + '.files')
+        if os.path.exists(files_file):
+            with open(files_file) as f: nfiles = sum(1 for _ in f)
+            print(f"Files: {nfiles}")
+        if os.path.exists(os.path.join(inst_dir, name + '.hold')):
+            print(f"Hold: yes")
+        sys.exit(0)
     sys.exit(f"未找到包: {name}")
 print(f"Package: {found['name']}")
 print(f"Version: {found['version']}")
@@ -325,17 +359,105 @@ PY
 # ------------------------------------------------------------------
 cmd_install() {
     require_bootstrap_tools
-    ensure_index
-    [ $# -eq 0 ] && die "用法: apt install <包名>..."
-    local pkgs=("$@")
-    local order
-    order=$(resolve_deps "${pkgs[@]}")
-    log "安装顺序: $order"
-    local p
-    for p in $order; do
-        install_one "$p"
+    [ $# -eq 0 ] && die "用法: apt install <包名|/path/to/pkg.tar.gz>..."
+
+    # 分类参数：本地 tar.gz 文件 vs 包名
+    local -a local_files=()
+    local -a pkg_names=()
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            /*|./*|~/*)
+                # 本地路径
+                case "$arg" in
+                    *.tar.gz|*.tgz)
+                        [ -f "$arg" ] || die "文件不存在: $arg"
+                        local_files+=("$arg")
+                        ;;
+                    *)
+                        die "不支持的本地文件类型（仅支持 .tar.gz）: $arg"
+                        ;;
+                esac
+                ;;
+            *)
+                pkg_names+=("$arg")
+                ;;
+        esac
     done
-    log "✓ 安装完成: ${pkgs[*]}"
+
+    # 1. 先装本地 tar.gz（不查索引、不解析依赖，直接解压）
+    local f
+    for f in "${local_files[@]}"; do
+        install_local_tarball "$f"
+    done
+
+    # 2. 再装包名（走索引 + 依赖解析）
+    if [ ${#pkg_names[@]} -gt 0 ]; then
+        ensure_index
+        local order
+        order=$(resolve_deps "${pkg_names[@]}")
+        log "安装顺序: $order"
+        local p
+        for p in $order; do
+            install_one "$p"
+        done
+    fi
+
+    log "✓ 安装完成"
+}
+
+# 安装本地 tar.gz 文件：不查索引、不解析依赖、不校验 sha256（用户提供，信任）
+# 包名从文件名提取（如 python-3.13.14-arm64-v8a.tar.gz → python）
+# 文件清单 + 版本号仍记录到 $INSTALLED_DIR，支持后续 apt remove
+install_local_tarball() {
+    local tarball="$1"
+    local basename
+    basename=$(basename "$tarball")
+    # 文件名格式：<name>-<version>-<abi>.tar.gz 或 <name>-<version>.tar.gz
+    # 取第一个 - 之前的部分作为包名
+    local name="${basename%%-*}"
+
+    log "从本地文件安装: $basename (包名: $name)"
+
+    # 安装前扫描 $PREFIX diff（记录新增文件）
+    local before_list="/tmp/.apt-before-$$"
+    ( cd "$PREFIX" && find . -type f -o -type l 2>/dev/null | sort ) > "$before_list"
+
+    # 解压到临时目录后原子复制到 $PREFIX
+    log "$name: 解压到 $PREFIX ..."
+    local tmp="/tmp/.apt-extract-$$"
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    if ! tar -xzf "$tarball" -C "$tmp"; then
+        rm -rf "$tmp" "$before_list"
+        die "$name 解压失败: $tarball"
+    fi
+
+    # 复制文件到 $PREFIX（保留权限）
+    ( cd "$tmp" && tar cf - . ) | ( cd "$PREFIX" && tar xf - )
+    rm -rf "$tmp"
+
+    # 安装后扫描 diff，记录文件清单
+    local after_list="/tmp/.apt-after-$$"
+    ( cd "$PREFIX" && find . -type f -o -type l 2>/dev/null | sort ) > "$after_list"
+    local files_list="$INSTALLED_DIR/$name.files"
+    mkdir -p "$INSTALLED_DIR"
+    comm -13 "$before_list" "$after_list" | sed 's|^\./||' > "$files_list"
+    rm -f "$before_list" "$after_list"
+
+    # 版本号从文件名提取（去 name- 前缀和 -abi.tar.gz 后缀）
+    local ver="unknown"
+    local rest="${basename#${name}-}"
+    ver="${rest%.tar.gz}"
+    ver="${ver%.tgz}"
+    # 去掉末尾的 -<abi>（如 -arm64-v8a）
+    ver="${ver%-arm64-v8a}"
+    ver="${ver%-aarch64}"
+
+    echo "$ver" > "$INSTALLED_DIR/$name"
+
+    local nfiles
+    nfiles=$(wc -l < "$files_list" | tr -d ' ')
+    log "✓ $name-$ver 已安装（$nfiles 个文件，来自本地 tarball）"
 }
 
 # 拓扑展开依赖（被依赖的包先），调用 python 解析 packages.json

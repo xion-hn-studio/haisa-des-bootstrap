@@ -75,18 +75,34 @@ pkg_build() {
     python3 -m zipfile -e "$wheel" "$pydir/site-packages/"
 
     # pip 入口脚本（shebang 指向目标设备上的 python3.13）
+    # 1. pip.real：原版 pip 入口（Python 脚本，调 pip._internal.cli.main）
+    # 2. pip：haisa-des pip wrapper（bash 脚本，优先查 wheels-index.json，未命中报错）
+    # 3. pip3 / pip3.13：符号链接 → pip（统一走 wrapper）
     local pip_bin="$PKG_STAGE$PREFIX/bin"
     local pip_name="pip${PKG_VERSION%.*}"   # pip3.13（去掉末尾 patch 版本号）
-    cat > "$pip_bin/$pip_name" << PIP_EOF
+
+    # 1. 原版 pip 入口（直接写成 pip.real，wrapper 透传未拦截命令时调用它）
+    cat > "$pip_bin/pip.real" << PIP_EOF
 #!$PREFIX/bin/$pyver
 import sys
 from pip._internal.cli.main import main
 if __name__ == '__main__':
     sys.exit(main())
 PIP_EOF
-    chmod +x "$pip_bin/$pip_name"
-    ln -sf "$pip_name" "$pip_bin/pip3"
-    ln -sf "$pip_name" "$pip_bin/pip"
+    chmod +x "$pip_bin/pip.real"
+
+    # 2. haisa-des pip wrapper（bash 脚本，来自 lib/pip-wrapper.sh）
+    #    装包时把 wrapper 脚本一并拷贝到 staging
+    if [ -f "$BS_ROOT/lib/pip-wrapper.sh" ]; then
+        install -m 755 "$BS_ROOT/lib/pip-wrapper.sh" "$pip_bin/pip"
+    else
+        warn "  pip wrapper 脚本缺失（lib/pip-wrapper.sh），仅安装原版 pip"
+        ln -sf "pip.real" "$pip_bin/pip"
+    fi
+
+    # 3. pip3 / pip3.13 → pip（统一走 wrapper）
+    ln -sf "pip" "$pip_bin/pip3"
+    ln -sf "pip" "$pip_bin/$pip_name"
 
     # python3 → python3.13（CPython make install 默认会建该链接，但本脚本对
     # make install 做了容错兜底，若 compileall 中断可能缺失。显式补一个确保
