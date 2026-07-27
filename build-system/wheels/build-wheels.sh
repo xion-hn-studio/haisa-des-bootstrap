@@ -101,10 +101,15 @@ for u in d.get("urls", []):
         continue
     parts = fn.split("-")
     # wheel 文件名格式: {name}-{ver}-{py}-{abi}-{plat}-{build?}.whl
+    # py 与 abi 是分开两段（如 cp39 / abi3），拼成 "cp39-abi3" 与 PKG_PY_TAG 比较
+    # py_tag 形如 cp313 / cp39-abi3 / py3
     if len(parts) >= 5:
         wheel_py = parts[2]
-        # wheel_py 形如 cp313 或 py3（纯 Python wheel）
-        if py_tag in wheel_py or wheel_py == "py3":
+        wheel_abi = parts[3]
+        wheel_py_abi = f"{wheel_py}-{wheel_abi}"
+        if (py_tag == wheel_py_abi
+            or py_tag == wheel_py
+            or wheel_py == "py3"):
             matches.append((fn, u["url"], u.get("digests", {}).get("sha256", "")))
 if not matches:
     sys.stderr.write(f"未找到匹配 {py_tag}+aarch64 的 wheel\n")
