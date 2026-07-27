@@ -47,7 +47,10 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
           cd build-system
           ./build.sh build all
-          ./make-bootstrap.sh
+          # 注意：不在此调用 make-bootstrap.sh。
+          # make-bootstrap.sh 会删除 staging 里的全部符号链接（含 python3 -> python3.13），
+          # 而后续 pygame wheel 构建需要 staging python3 可执行。make-bootstrap 移到
+          # pygame wheel 之后作为最终打包步骤。
 
       # pygame wheel 用 source 方法交叉编译，需 staging 中的 SDL2 系列 + Python，
       # 并通过 QEMU binfmt 让 staging 的 aarch64 python3 可在 x86_64 host 运行。
@@ -75,6 +78,16 @@ jobs:
           # numpy/Pillow/lxml 走 download 方法（快，纯下载）
           ./wheels/build-wheels.sh build numpy Pillow lxml
           ./make-wheels-index.sh
+
+      # make-bootstrap 是最终打包步骤：会删除 staging 符号链接，必须在所有需要
+      # staging 完整性的构建（pygame wheel）之后。test variant 无 pygame 步骤，
+      # 直接在此打包。
+      - name: Make bootstrap
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          cd build-system
+          ./make-bootstrap.sh
 
       - name: Generate packages index (prod only)
         if: matrix.variant == 'prod'
