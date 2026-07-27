@@ -60,7 +60,8 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           cd build-system
-          ./wheels/build-wheels.sh build numpy Pillow lxml pygame
+          # 构建 ALL_WHEELS（39 个 download 方法 wheel）
+          ./wheels/build-wheels.sh build all
           ./make-wheels-index.sh
 
       # make-bootstrap 是最终打包步骤：会删除 staging 符号链接。
@@ -180,8 +181,8 @@ jobs:
       - name: Build wheels (download method)
         run: |
           cd build-system
-          # 全部 4 个 wheel 走 download 方法，push to main 时快速验证 URL 可达
-          ./wheels/build-wheels.sh build numpy Pillow lxml pygame
+          # 构建 ALL_WHEELS（39 个 download 方法 wheel），验证 PyPI URL 可达
+          ./wheels/build-wheels.sh build all
 
       - name: Upload wheels artifacts (CI 内调试用)
         continue-on-error: true

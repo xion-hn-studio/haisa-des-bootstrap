@@ -20,7 +20,36 @@ source "$BS_ROOT/config.sh"
 source "$BS_ROOT/lib/common.sh"
 
 DIST_WHEELS_DIR="$BS_ROOT/dist/wheels"
-ALL_WHEELS="numpy Pillow lxml pygame"
+# 全部 wheel 包列表（download 方法，从 PyPI 拉 aarch64 wheel）
+# 分类：
+#   - JSON/序列化: ujson orjson msgpack simplejson
+#   - 数据处理: numpy pandas pyarrow
+#   - 加密: cryptography pycryptodome bcrypt
+#   - FFI/并发/模板: cffi greenlet markupsafe
+#   - 网络: aiohttp yarl multidict frozenlist
+#   - 数据库: sqlalchemy asyncpg psycopg2-binary
+#   - 编译/类型: cython mypy
+#   - 配置: pyyaml tomli rtoml
+#   - 压缩: zstandard brotli lz4
+#   - 科学: scipy numba
+#   - 字符串/编码: regex chardet charset-normalizer
+#   - 日期: pendulum
+#   - 系统工具: psutil watchdog
+#   - 图形: Pillow pygame
+#   - XML: lxml
+ALL_WHEELS="numpy pandas pyarrow scipy numba \
+           ujson orjson msgpack simplejson \
+           cryptography pycryptodome bcrypt \
+           cffi greenlet markupsafe \
+           aiohttp yarl multidict frozenlist \
+           sqlalchemy asyncpg psycopg2-binary \
+           cython mypy \
+           pyyaml tomli rtoml \
+           zstandard brotli lz4 \
+           regex chardet charset-normalizer \
+           pendulum \
+           psutil watchdog \
+           Pillow pygame lxml"
 
 # 包定义: 每个 wheels/packages/<name>/build.sh 定义:
 #   PKG_NAME, PKG_VERSION, PKG_METHOD (download|source),
