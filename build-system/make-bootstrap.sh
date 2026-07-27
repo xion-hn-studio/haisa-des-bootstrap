@@ -20,6 +20,16 @@ rm -f "$OUT"
 find "$SROOT" -name '*.la' -delete 2>/dev/null || true
 mkdir -p "$SROOT/tmp"
 
+# 在删除符号链接之前，从 python 包的 staging 备份原版 pip 入口到 bin/pip.real
+# python 包提供 bin/pip3.13 = 真文件（带 shebang 的 Python 脚本）
+# pip wrapper 包合并后已覆盖 bin/pip 为 wrapper 脚本，且把 bin/pip3.13 改为符号链接 → pip
+# 所以原版真文件只能从 PKG_STAGE_ROOT/python/ 取（合并到总 staging 前的快照）
+if [ ! -e "$SROOT/bin/pip.real" ] && [ -f "$PKG_STAGE_ROOT/python$PREFIX/bin/pip3.13" ]; then
+    cp "$PKG_STAGE_ROOT/python$PREFIX/bin/pip3.13" "$SROOT/bin/pip.real"
+    chmod +x "$SROOT/bin/pip.real"
+    log "已备份原版 pip 入口到 $SROOT/bin/pip.real"
+fi
+
 # 1) 记录并剔除符号链接
 SYMLINKS_TXT="$STAGE_DIR/SYMLINKS.txt"
 : > "$SYMLINKS_TXT"
@@ -56,22 +66,6 @@ PYEOF
 # - pip: wrapper 脚本，接管 pip 命令优先查本地 wheel 索引；原版 pip 在此重命名为 pip.real
 BUILTIN_PACKAGES="apt pip"
 
-# 在打包前处理 pip wrapper：把原版 pip 重命名为 pip.real
-# （pip 包的 staging 已含 wrapper 脚本，merge 后会覆盖原版 pip；这里先备份原版）
-# 注意：pip wrapper 包 install 时已创建 pip3/pip3.13 → pip 符号链接，
-# 但原版 python 包安装时也创建了 pip → pip3.13 的符号链接，会被 wrapper 包覆盖。
-# 重命名原版 pip 入口（python 包提供），让 wrapper 能透传未拦截命令给原版。
-# 必须在 pip 包合并到总 staging 之后、打 zip 之前做。
-# （pip 包 build 顺序在 python 之后，merge_stage 已让 pip wrapper 覆盖了原版 pip；
-#  这里针对 wrapper 包的特殊情况，重新整理 pip 入口）
-real_pip="$SROOT/bin/pip.real"
-orig_pip="$SROOT/bin/pip3.13"
-if [ -x "$orig_pip" ] && [ ! -e "$real_pip" ]; then
-    # wrapper 包已把 wrapper 装到 bin/pip，但 wrapper 需要 pip.real 作为原版入口
-    # 此时 bin/pip3.13 是 python 包安装的原版入口，把它复制为 pip.real
-    cp "$orig_pip" "$real_pip"
-    log "已备份原版 pip 入口到 $real_pip"
-fi
 for stage in "$PKG_STAGE_ROOT"/*/; do
     name="$(basename "$stage")"
     [ -f "$stage/.done" ] || continue
