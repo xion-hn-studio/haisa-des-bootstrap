@@ -77,4 +77,36 @@ Version: $PKG_VERSION
 Libs: -L\${libdir} -lSDL2
 Cflags: -I\${includedir}/SDL2
 EOF
+
+    # 手写 sdl2-config 脚本：pygame setup.py 通过 SDL_CONFIG 环境变量或
+    # 默认 sdl2-config 名字查找 SDL2 配置工具（config_unix.py:222）。
+    # CMake 不生成该脚本，需手写一份输出 cflags/libs，让 pygame 能找到 SDL2。
+    #
+    # 关键：脚本输出的 -I/-L 路径必须是 CI 主机能访问的 staging 路径，
+    # 而非设备路径 $PREFIX（CI 主机不存在 /data/data/...）。
+    # 通过 STAGE_DIR 环境变量覆盖 prefix：cross-env.sh 会 export STAGE_DIR，
+    # 设备运行时 STAGE_DIR 为空，自动回退到 $PREFIX（设备路径）。
+    local bin_dir="$PKG_STAGE$PREFIX/bin"
+    mkdir -p "$bin_dir"
+    cat >"$bin_dir/sdl2-config" <<EOF
+#!/bin/sh
+# HaisaDes 手写的 sdl2-config（CMake 构建的 SDL2 不生成此脚本）
+# STAGE_DIR 由 cross-env.sh 设置（CI 交叉编译时），设备运行时为空用 \$PREFIX
+prefix="\${STAGE_DIR:-}$PREFIX"
+exec_prefix="\${prefix}"
+libdir="\${exec_prefix}/lib"
+includedir="\${prefix}/include"
+
+while [ \$# -gt 0 ]; do
+    case \$1 in
+        --version) echo "$PKG_VERSION" ;;
+        --cflags)  echo "-I\${includedir}/SDL2" ;;
+        --libs)    echo "-L\${libdir} -lSDL2" ;;
+        --prefix)  echo "\${prefix}" ;;
+        *) echo "Unknown option: \$1" >&2; exit 1 ;;
+    esac
+    shift
+done
+EOF
+    chmod 0755 "$bin_dir/sdl2-config"
 }

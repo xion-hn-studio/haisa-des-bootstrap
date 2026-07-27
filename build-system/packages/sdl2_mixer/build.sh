@@ -2,7 +2,7 @@
 PKG_NAME="sdl2_mixer"
 PKG_VERSION="2.8.0"
 PKG_SRC_URL="https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.0/SDL2_mixer-2.8.0.tar.gz"
-PKG_SRC_SHA256=""
+PKG_SRC_SHA256="1cfb34c87b26dbdbc7afd68c4f545c0116ab5f90bbfecc5aebe2a9cb4bb31549"
 PKG_SRC_DIR="SDL2_mixer-2.8.0"
 
 pkg_build() {

@@ -2,9 +2,8 @@
 PKG_NAME="bzip2"
 PKG_VERSION="1.0.8"
 # sourceware.org 偶发 503/超时（CI 多次失败），改用 GitHub 镜像
-# GitHub archive 的 sha256 与 sourceware 不同，先留空（CI 拿到实际值后补）
 PKG_SRC_URL="https://github.com/libarchive/bzip2/archive/refs/tags/bzip2-1.0.8.tar.gz"
-PKG_SRC_SHA256=""
+PKG_SRC_SHA256="db106b740252669664fd8f3a1c69fe7f689d5cd4b132f82ba82b9afba27627df"
 PKG_SRC_DIR="bzip2-bzip2-1.0.8"
 
 pkg_build() {
