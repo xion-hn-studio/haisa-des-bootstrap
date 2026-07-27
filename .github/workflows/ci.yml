@@ -138,13 +138,13 @@ jobs:
           - packages.json: 包索引（App 端 PM 用）
           - bootstrap-version.json: bootstrap 版本信息（App 端 OTA 升级用）
           - packages/*.tar.gz: 单独包归档（按需安装）
-          - wheels/*.whl: numpy/Pillow/lxml/pygame wheel（pip install 用）
+          - wheels/*.whl: 39 个 wheel（numpy/pandas/scipy/pygame/ujson 等常用库，pip install 用）
           - wheels-index.json: wheel 索引（App 端 PM 用）" \
               --draft
           fi
 
           # 上传资产（同名会覆盖，便于重试）
-          # prod 变体已构建全部 4 个 wheel（pygame + numpy/Pillow/lxml）+ wheels-index.json
+          # prod 变体已构建全部 39 个 wheel + wheels-index.json
           gh release upload "$TAG" --repo "$REPO" \
             bootstrap-arm64-v8a.zip \
             packages.json \
@@ -154,8 +154,8 @@ jobs:
             wheels-index.json \
             --clobber
 
-          # 发布（去 draft）
-          gh release edit "$TAG" --repo "$REPO" --draft=false
+          # 发布（去 draft）+ 标记为 latest（确保 releases/latest/download/ 指向最新版）
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest
 
           echo "✓ 已发布 $TAG 到 $REPO"
           echo "  下载链接（公开）:"
