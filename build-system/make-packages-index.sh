@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# make-packages-index.sh —— 扫描 dist/packages/*.tar.gz 生成 packages.json 索引
+# make-packages-index.sh —— 扫描 dist/packages/*.deb 生成 packages.json 索引
 #
-# 索引格式供 App 侧 PackageManager 消费：
-#   - download_url: 指向 GitHub Releases 下载地址（REPO_URL 环境变量配置）
-#   - sha256: 设备端下载后校验，防篡改/防传输损坏
-#   - depends: 安装时按依赖顺序递归装包
-#   - symlinks: tar.gz 不含符号链接，安装时需按此清单重建
+# M4 改造：从扫描 .tar.gz 改为扫描 .deb
+#   - 包名/版本/依赖/描述从 .deb 的 control 提取（不依赖文件名解析）
+#   - symlinks 字段移除（.deb 由 dpkg 安装，自动处理符号链接）
+#   - download_url 指向 .deb 文件
+#
+# 注意：真 apt 用 make-apt-repo.sh 生成的 Debian Packages/Release 元数据。
+#       本脚本的 packages.json 仅供 App 端 PackageManager（Java）兼容使用，
+#       App 端改造为调 apt 后可废弃。
 #
 # 用法:
 #   ./make-packages-index.sh
@@ -29,88 +32,19 @@ RELEASE_TAG="${RELEASE_TAG:?RELEASE_TAG 未设置（CI 必须传真实 tag 名�
 PKG_DIR="$DIST_DIR/packages"
 INDEX_FILE="$DIST_DIR/packages.json"
 
-[ -d "$PKG_DIR" ] || die "packages 目录不存在: $PKG_DIR（先运行 ./make-bootstrap.sh）"
+[ -d "$PKG_DIR" ] || die "packages 目录不存在: $PKG_DIR（先运行 ./build.sh build all）"
 
-# 从包定义文件提取依赖（pkg_deps 函数在 build.sh 里定义）
-get_deps() {
-    local name="$1"
-    # source build.sh 会定义 pkg_deps，调用取依赖
-    ( source "$BS_ROOT/packages/$name/build.sh" 2>/dev/null && pkg_deps "$name" ) 2>/dev/null | tr '\n' ' '
-}
-
-# 从包定义文件提取描述（PKG_DESC 变量，可选）
-get_desc() {
-    local name="$1"
-    ( source "$BS_ROOT/packages/$name/build.sh" 2>/dev/null && echo "${PKG_DESC:-}" ) 2>/dev/null
-}
-
-# 扫描某包 staging 里的符号链接（tar.gz 打包前已剔除，这里从独立 staging 重新收集）
-# 输出格式: link路径<TAB>目标（相对 prefix 根），与 SYMLINKS.txt 一致
-get_symlinks() {
-    local name="$1"
-    local stage_dir="$PKG_STAGE_ROOT/$name$PREFIX"
-    [ -d "$stage_dir" ] || return 0
-    while IFS= read -r l; do
-        local rel="${l#"$stage_dir"/}"
-        local tgt
-        tgt=$(readlink "$l")
-        printf '%s\t%s\n' "$rel" "$tgt"
-    done < <(find "$stage_dir" -type l 2>/dev/null)
-}
-
-log "生成 packages.json 索引..."
+log "生成 packages.json 索引（扫描 .deb）..."
 
 # 用 python3 生成 JSON（避免 bash 拼接 JSON 的转义地狱）
-python3 - "$PKG_DIR" "$INDEX_FILE" "$REPO_URL" "$RELEASE_TAG" "$TARGET_ABI" "$PKG_STAGE_ROOT" "$BS_ROOT" <<'PYEOF'
-import os, sys, json, hashlib, subprocess
+# 从 .deb 的 control.tar.gz 提取 Package/Version/Depends/Description
+python3 - "$PKG_DIR" "$INDEX_FILE" "$REPO_URL" "$RELEASE_TAG" <<'PYEOF'
+import os, sys, json, hashlib, subprocess, io, tarfile
 
 pkg_dir = sys.argv[1]
 index_file = sys.argv[2]
 repo_url = sys.argv[3]
 release_tag = sys.argv[4]
-target_abi = sys.argv[5]
-pkg_stage_root = sys.argv[6]
-bs_root = sys.argv[7]
-prefix = "/data/data/com.haisades/files/usr"
-
-def get_deps(name):
-    """从 build.sh 的 pkg_deps 函数提取依赖列表"""
-    try:
-        r = subprocess.run(
-            ["bash", "-c", f'source "{bs_root}/packages/{name}/build.sh" 2>/dev/null && pkg_deps "{name}"'],
-            capture_output=True, text=True, timeout=5
-        )
-        return r.stdout.strip().split() if r.stdout.strip() else []
-    except Exception:
-        return []
-
-def get_symlinks(name):
-    """扫描包 staging 的符号链接，返回 [{link, target}, ...]
-    target 保持 staging 里的原始值（可能是相对/绝对路径）。
-    绝对路径的目标（如 /home/runner/...）转成相对 prefix 的路径或目标文件名，
-    避免设备上 symlink 指向不存在的宿主路径。"""
-    stage_dir = f"{pkg_stage_root}/{name}{prefix}"
-    if not os.path.isdir(stage_dir):
-        return []
-    symlinks = []
-    for root, dirs, files in os.walk(stage_dir):
-        for fn in files + dirs:
-            full = os.path.join(root, fn)
-            if os.path.islink(full):
-                rel = os.path.relpath(full, stage_dir)
-                tgt = os.readlink(full)
-                # 绝对路径目标：转成相对 link 所在目录的相对路径
-                if tgt.startswith("/"):
-                    link_abs = os.path.join(stage_dir, rel)
-                    link_dir = os.path.dirname(link_abs)
-                    try:
-                        tgt_rel = os.path.relpath(tgt, link_dir)
-                        tgt = tgt_rel
-                    except Exception:
-                        # 无法转换则用目标 basename 兜底
-                        tgt = os.path.basename(tgt)
-                symlinks.append({"link": rel, "target": tgt})
-    return symlinks
 
 def sha256_of(path):
     h = hashlib.sha256()
@@ -119,61 +53,66 @@ def sha256_of(path):
             h.update(chunk)
     return h.hexdigest()
 
+def parse_control(deb_path):
+    """从 .deb 里提取 control.tar.gz，解析 control 文件字段"""
+    # ar 归档: debian-binary, control.tar.gz, data.tar.gz
+    r = subprocess.run(
+        ["ar", "p", deb_path, "control.tar.gz"],
+        capture_output=True, check=True
+    )
+    with tarfile.open(fileobj=io.BytesIO(r.stdout), mode="r:gz") as tar:
+        control_file = tar.extractfile("control")
+        if control_file is None:
+            return {}
+        text = control_file.read().decode("utf-8")
+    fields = {}
+    current_key = None
+    for line in text.splitlines():
+        if line.startswith(" ") or line.startswith("\t"):
+            if current_key:
+                fields[current_key] += "\n" + line
+        elif ":" in line:
+            k, _, v = line.partition(":")
+            fields[k.strip()] = v.strip()
+            current_key = k.strip()
+    return fields
+
 packages = []
 for fn in sorted(os.listdir(pkg_dir)):
-    if not fn.endswith(".tar.gz"):
+    if not fn.endswith(".deb"):
         continue
-    # 文件名格式: <name>-<version>-<abi>[-test].tar.gz
-    # 用贪婪匹配剥离 -<abi>.tar.gz 后缀
-    base = fn[:-len(".tar.gz")]  # python-3.13.14-arm64-v8a
-    # 从右侧找 -arm64-v8a 或 -arm64-v8a-test
-    if base.endswith(f"-{target_abi}-test"):
-        abi_suffix = f"-{target_abi}-test"
-        name_ver = base[:-len(abi_suffix)]
-    elif base.endswith(f"-{target_abi}"):
-        abi_suffix = f"-{target_abi}"
-        name_ver = base[:-len(abi_suffix)]
-    else:
-        # 非 arm64-v8a 的包，跳过（理论上不该出现）
-        continue
+    deb_path = os.path.join(pkg_dir, fn)
+    fields = parse_control(deb_path)
+    size = os.path.getsize(deb_path)
+    sha = sha256_of(deb_path)
 
-    # name_ver 形如 python-3.13.14，从右找第一个 - 分割
-    # 但版本号里可能含 -，包名不含 -，所以从左找第一个 -
-    idx = name_ver.find("-")
-    if idx < 0:
-        continue
-    name = name_ver[:idx]
-    version = name_ver[idx+1:]
-
-    full_path = os.path.join(pkg_dir, fn)
-    size = os.path.getsize(full_path)
-    sha = sha256_of(full_path)
-    deps = get_deps(name)
-    symlinks = get_symlinks(name)
-
-    # REPO_URL 统一为仓库根（如 https://github.com/XION-HN/haisa-des-repo），
-    # 拼出标准 release 资产下载 URL。
-    # 若误传了带 /releases 的 URL，也做一次容错剥离，避免 releases/releases 重复。
+    # REPO_URL 统一为仓库根，拼出标准 release 资产下载 URL
     base = repo_url.rstrip("/")
     if base.endswith("/releases"):
         base = base[: -len("/releases")]
     download_url = f"{base}/releases/download/{release_tag}/{fn}"
 
+    # Depends 从 control 提取（逗号分隔），转成列表
+    depends_str = fields.get("Depends", "")
+    depends = [d.strip().split(" ")[0] for d in depends_str.split(",") if d.strip()] if depends_str else []
+
     packages.append({
-        "name": name,
-        "version": version,
-        "depends": deps,
+        "name": fields.get("Package", ""),
+        "version": fields.get("Version", ""),
+        "depends": depends,
         "size": size,
         "sha256": sha,
         "filename": fn,
         "download_url": download_url,
-        "symlinks": symlinks,
+        # symlinks 字段移除：.deb 由 dpkg 安装，自动处理符号链接
+        # 保留空列表兼容旧 App 端解析逻辑
+        "symlinks": [],
     })
 
 index = {
-    "repo_version": 1,
+    "repo_version": 2,  # M4: 版本号升级，标识 .deb 格式
     "generated_at": subprocess.check_output(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"]).decode().strip(),
-    "abi": target_abi,
+    "format": "deb",  # 标识包格式（旧版 tar.gz 无此字段）
     "packages": packages,
 }
 
@@ -183,7 +122,7 @@ with open(index_file, "w") as f:
 print(f"索引写入: {index_file}")
 print(f"包数量: {len(packages)}")
 for p in packages:
-    print(f"  {p['name']}-{p['version']}  {p['size']//1024}KB  deps={p['depends']}  symlinks={len(p['symlinks'])}")
+    print(f"  {p['name']}_{p['version']}  {p['size']//1024}KB  deps={p['depends']}")
 PYEOF
 
 log "packages.json 生成完成: $INDEX_FILE"

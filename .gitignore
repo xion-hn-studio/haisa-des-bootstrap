@@ -2,5 +2,10 @@
 build-system/dist/
 build-system/.cache/
 build-system/.work/
+
+# GPG 密钥（绝不提交！私钥泄漏会导致仓库签名信任失效）
+build-system/.gpg/
+build-system/.ci-keyring/
+
 **/*.pyc
 __pycache__/

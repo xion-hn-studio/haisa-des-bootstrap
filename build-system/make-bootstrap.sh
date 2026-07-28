@@ -50,28 +50,12 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
 print("written:", out)
 PYEOF
 
-# 3) 每包独立 tar.gz（路径相对 prefix 根，便于手动装包演练: tar -xzf x.tar.gz -C $PREFIX）
-# 内置包（已包含在 bootstrap.zip 内的脚本/工具）：不打单独 tar.gz，也不进 packages.json
-# - apt: 包管理器 CLI，依赖 bootstrap 已有命令；发布到 Releases 反而是冗余
-# python 不在内置列表 → python 会打成 tar.gz + 进 packages.json
-# pip wrapper 已合并到 python 包内，随 python 一起安装
-BUILTIN_PACKAGES="apt"
-
-for stage in "$PKG_STAGE_ROOT"/*/; do
-    name="$(basename "$stage")"
-    [ -f "$stage/.done" ] || continue
-    case " $BUILTIN_PACKAGES " in
-        *" $name "*) log "跳过内置包 $name（已包含在 bootstrap.zip）"; continue ;;
-    esac
-    # 从包定义取版本号
-    PKG_NAME="" PKG_VERSION=""
-    unset -f pkg_build pkg_prepare_src 2>/dev/null || true
-    source "$BS_ROOT/packages/$name/build.sh"
-    pdir="$stage$PREFIX"
-    [ -d "$pdir" ] || continue
-    (cd "$pdir" && tar czf "$DIST_DIR/packages/${PKG_NAME}-${PKG_VERSION}-${TARGET_ABI}${OUT_SUFFIX}.tar.gz" .)
-done
+# 3) .deb 包已在 build.sh build_one 阶段打好（dist/packages/<name>_<ver>_aarch64.deb）
+#    make-bootstrap.sh 只负责打 bootstrap.zip（含全部 staging，供 App 端首装）
+#    后续 make-apt-repo.sh 扫描 dist/packages/*.deb 生成 Debian 仓库元数据
+log ".deb 包已在 build 阶段打好: $DIST_DIR/packages/"
+ls -1 "$DIST_DIR/packages/"*.deb 2>/dev/null | sed 's/^/  /' || warn "无 .deb 包（先运行 ./build.sh build all）"
 
 log "产物:"
-du -h "$OUT" "$DIST_DIR/packages/"*.tar.gz 2>/dev/null | sed 's/^/  /'
+du -h "$OUT" 2>/dev/null | sed 's/^/  /'
 sha256sum "$OUT" | sed 's/^/  /'

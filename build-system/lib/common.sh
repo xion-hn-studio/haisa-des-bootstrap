@@ -89,3 +89,26 @@ gnu_configure() {
 stage_install() {
     make install DESTDIR="$PKG_STAGE" "$@"
 }
+
+# make_deb：把当前包 PKG_STAGE 打成 Debian .deb
+# 参数:
+#   $1 depends  逗号分隔的依赖包列表（可空）
+#   $2 desc     包描述（可空，默认 "$PKG_NAME package"）
+# 产物: $DIST_DIR/packages/<name>_<version>_aarch64.deb
+# 设计:
+#   - 调用 lib/mk-deb.sh 构造 ar 归档（debian-binary + control.tar.gz + data.tar.gz）
+#   - data.tar.gz 根 = $PKG_STAGE$PREFIX（相对路径，设备端 dpkg -i --instdir=$PREFIX 落位）
+#   - Architecture 固定 aarch64（Termux 惯例，不用 arm64）
+make_deb() {
+    local depends="${1:-}"
+    local desc="${2:-$PKG_NAME package}"
+    local deb_name="${PKG_NAME}_${PKG_VERSION}_aarch64.deb"
+    local deb_path="$DIST_DIR/packages/$deb_name"
+
+    mkdir -p "$DIST_DIR/packages"
+    bash "$BS_ROOT/lib/mk-deb.sh" \
+        "$PKG_NAME" "$PKG_VERSION" \
+        "$PKG_STAGE$PREFIX" \
+        "$deb_path" \
+        "$depends" "$desc"
+}

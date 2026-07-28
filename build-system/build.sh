@@ -3,7 +3,8 @@
 # 用法:
 #   ./build.sh list                列出全部包及依赖
 #   ./build.sh build <包...|all>   构建（含依赖），产物进 staging
-#   ./build.sh bootstrap           在 build all 之后打出 dist/bootstrap-<abi>[-test].zip + 单包 tar.gz
+#   ./build.sh bootstrap           在 build all 之后打出 dist/bootstrap-<abi>[-test].zip
+#   ./build.sh repo                生成 apt 仓库元数据并签名（make-apt-repo + make-keyring sign）
 #   ./build.sh clean [包...]       清理
 # 环境变量: TOOLCHAIN=ndk|termux-local（默认 ndk）  VARIANT=prod|test（默认 prod）  JOBS=N
 set -euo pipefail
@@ -19,14 +20,20 @@ source "$BS_ROOT/lib/common.sh"
 # 用于支持设备端 pip 安装 pygame 等图形库 wheel（无需 gcc）
 # M3.2 扩展：apt 命令行（包管理器 CLI，Debian apt 风格）
 # M3.3 扩展：pip wrapper 已合并到 python 包内（python 包 build 时一并安装 wrapper + pip.real）
+# M4 扩展：真 apt 2.8.1 + dpkg + 13 个依赖库（liblz4/zstd/xxhash/libiconv/
+#          libgpg-error/libgcrypt/gmp/nettle/libtasn1/p11-kit/libunistring/libidn2/libgnutls）
 ALL_PACKAGES="zlib ncurses bash openssl ca-certificates curl toybox \
-              libffi sqlite bzip2 xz expat readline python \
+              libffi sqlite bzip2 xz expat readline \
+              liblz4 zstd xxhash libiconv \
+              libgpg-error libgcrypt \
+              gmp nettle libtasn1 p11-kit libunistring libidn2 libgnutls \
               libpng libjpeg-turbo freetype sdl2 sdl2_image sdl2_mixer sdl2_ttf \
-              apt"
+              python dpkg apt"
 
-# 内置包：打进 bootstrap.zip 的包（不打单独 tar.gz，也不进 packages.json）
-# python 不在内置列表 → python 会打成单独 tar.gz + 进 packages.json，由 apt install python 安装
-BUILTIN_PACKAGES="apt"
+# 内置包：打进 bootstrap.zip 的包（不打单独 .deb，也不进 Packages 索引）
+# M4 后 apt 改为真 apt 编译，打 .deb；bootstrap.zip 只含最小运行时（手动指定）
+# 当前保留空列表：所有包都打 .deb，bootstrap.zip 仍含全部（兼容现有 App 端）
+BUILTIN_PACKAGES=""
 
 pkg_deps() {
     case "$1" in
@@ -53,8 +60,27 @@ pkg_deps() {
         sdl2_image)      echo "sdl2 libpng libjpeg-turbo" ;;
         sdl2_mixer)      echo "sdl2" ;;
         sdl2_ttf)        echo "sdl2 freetype" ;;
-        # ---- M3.2 apt CLI（运行时依赖 bash/curl/tar/sha256sum/python，构建时无依赖）----
-        apt)             echo "" ;;
+        # ---- M4 真 apt 依赖链 ----
+        # 层级 0：无依赖
+        liblz4)          echo "" ;;
+        zstd)            echo "" ;;
+        xxhash)          echo "" ;;
+        libiconv)        echo "" ;;
+        # 层级 1：libgcrypt 链
+        libgpg-error)    echo "" ;;
+        libgcrypt)       echo "libgpg-error" ;;
+        # 层级 2：libgnutls 链
+        gmp)             echo "" ;;
+        nettle)          echo "gmp" ;;
+        libtasn1)        echo "" ;;
+        p11-kit)         echo "libtasn1" ;;
+        libunistring)    echo "" ;;
+        libidn2)         echo "libunistring" ;;
+        libgnutls)       echo "gmp nettle libtasn1 p11-kit libunistring libidn2" ;;
+        # dpkg：静态库，无构建依赖
+        dpkg)            echo "" ;;
+        # apt：真 Debian apt 2.8.1，依赖 dpkg + TLS/压缩库
+        apt)             echo "dpkg liblz4 zstd xxhash libiconv libgcrypt libgnutls" ;;
         *) die "未知包: $1" ;;
     esac
 }
@@ -89,6 +115,15 @@ build_one() {
     fi
     ( cd "$SRC_DIR/$PKG_SRC_DIR" && pkg_build )
     merge_stage "$name"
+    # 打 .deb（BUILTIN_PACKAGES 不打，打进 bootstrap.zip）
+    case " $BUILTIN_PACKAGES " in
+        *" $name "*) log "$name: 内置包，不打 .deb（进 bootstrap.zip）" ;;
+        *)
+            local deps_csv
+            deps_csv=$(pkg_deps "$name" | tr ' ' ',' | sed 's/,$//')
+            make_deb "$deps_csv" "${PKG_DESC:-}"
+            ;;
+    esac
     touch "$PKG_STAGE/.done"
     log "===== $name-$PKG_VERSION 完成 ====="
 }
@@ -131,6 +166,36 @@ case "$cmd" in
         ;;
     bootstrap)
         "$BS_ROOT/make-bootstrap.sh"
+        ;;
+    repo)
+        # 生成 Debian 仓库元数据（Release/Packages/Packages.gz）并签名
+        # CI 用法：
+        #   printf '%s' "$HAISADES_GPG_PRIVATE_KEY" | ./make-keyring.sh import-private
+        #   ./build.sh repo
+        # 本地用法（需先 ./make-keyring.sh init .gpg）：
+        #   ./build.sh repo
+        "$BS_ROOT/make-apt-repo.sh"
+        rel="$DIST_DIR/apt-repo/dists/stable/Release"
+        if [ ! -f "$rel" ]; then
+            die "Release 文件未生成: $rel（先确保 make-apt-repo.sh 成功）"
+        fi
+        if [ -n "${HAISADES_GPG_PRIVATE_KEY:-}" ] || [ -d "$BS_ROOT/.gpg" ] || [ -d "$BS_ROOT/.ci-keyring" ]; then
+            # CI 模式：从 Secret 注入私钥到临时 keyring；本地模式：直接用 .gpg/
+            if [ -n "${HAISADES_GPG_PRIVATE_KEY:-}" ] && [ ! -d "$BS_ROOT/.ci-keyring" ]; then
+                printf '%s' "$HAISADES_GPG_PRIVATE_KEY" | "$BS_ROOT/make-keyring.sh" import-private
+            fi
+            # 本地模式优先 .gpg/（已有密钥），否则用 CI 注入的 .ci-keyring/
+            if [ -d "$BS_ROOT/.gpg" ]; then
+                GNUPGHOME="$BS_ROOT/.gpg" "$BS_ROOT/make-keyring.sh" sign "$rel"
+            else
+                "$BS_ROOT/make-keyring.sh" sign "$rel"
+            fi
+            log "仓库已签名: $DIST_DIR/apt-repo/"
+        else
+            warn "未配置 GPG 密钥（HAISADES_GPG_PRIVATE_KEY 未设置且无 .gpg/）"
+            warn "  仅生成未签名 Release。设备端需在 sources.list 加 [trusted=yes] 临时降级。"
+            warn "  生产部署：本地 ./make-keyring.sh init .gpg 后把公钥提交到仓库"
+        fi
         ;;
     clean)
         if [ $# -eq 0 ]; then rm -rf "$WORK_DIR" "$DIST_DIR"; log "已清理 $VARIANT 全部产物";

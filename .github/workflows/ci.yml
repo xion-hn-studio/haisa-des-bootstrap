@@ -82,6 +82,33 @@ jobs:
           cd build-system
           ./make-packages-index.sh
 
+      - name: Generate apt-repo + pip-repo (prod only)
+        if: matrix.variant == 'prod'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd build-system
+          # 1. apt-repo：扫描 dist/packages/*.deb 生成 Debian 仓库元数据
+          #    pool 按首字母布局: pool/main/<首字母>/<包名>/<deb>
+          ./make-apt-repo.sh
+          # 2. pip-repo：扫描 dist/wheels/*.whl 生成 PEP 503 simple 索引
+          #    simple/<首字母>/<规范化包名>/index.html
+          ./make-pip-repo.sh
+
+      - name: Sign apt Release (prod only)
+        if: matrix.variant == 'prod'
+        env:
+          HAISADES_GPG_PRIVATE_KEY: ${{ secrets.HAISADES_GPG_PRIVATE_KEY }}
+        run: |
+          cd build-system
+          # 从 GitHub Secret 注入 GPG 私钥，签名 Release 生成 InRelease + Release.gpg
+          if [ -z "$HAISADES_GPG_PRIVATE_KEY" ]; then
+            echo "::warning::HAISADES_GPG_PRIVATE_KEY 未设置，Release 未签名（设备端 apt update 会因签名校验失败）"
+            exit 0
+          fi
+          printf '%s' "$HAISADES_GPG_PRIVATE_KEY" | ./make-keyring.sh import-private
+          ./make-keyring.sh sign dist/apt-repo/dists/stable/Release
+
       - name: Generate bootstrap version json (prod only)
         if: matrix.variant == 'prod'
         env:
@@ -97,9 +124,11 @@ jobs:
           name: bootstrap-${{ matrix.variant }}
           path: |
             build-system/dist/*.zip
-            build-system/dist/packages/*.tar.gz
+            build-system/dist/packages/*.deb
             build-system/dist/packages.json
             build-system/dist/bootstrap-version.json
+            build-system/dist/apt-repo/
+            build-system/dist/pip-repo/
           if-no-files-found: warn
           retention-days: 7
 
@@ -122,8 +151,9 @@ jobs:
           REPO="XION-HN/haisa-des-repo"
           cd build-system/dist
 
-          echo "=== 待上传资产 ==="
-          ls -la bootstrap-arm64-v8a.zip packages.json bootstrap-version.json packages/*.tar.gz wheels/*.whl wheels-index.json
+          echo "=== 待上传到 Releases 的资产（仅固定资产，不传 apt-repo/pip-repo）==="
+          ls -la bootstrap-arm64-v8a.zip packages.json bootstrap-version.json \
+                 packages/*.deb wheels/*.whl wheels-index.json 2>&1 | head -20
 
           # 检查 release 是否已存在；不存在则创建（草稿，避免半成品暴露）
           if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
@@ -134,22 +164,39 @@ jobs:
               --notes "bootstrap release $TAG
 
           由 haisa-des-bootstrap CI 自动发布。
-          - bootstrap-arm64-v8a.zip: 完整 bootstrap（含 Python 3.13 + pip + 21 个原生包）
-          - packages.json: 包索引（App 端 PM 用）
+
+          ## 固定资产（GitHub Releases）
+
+          - bootstrap-arm64-v8a.zip: 完整 bootstrap（含 Python 3.13 + pip + 原生包）
+          - packages.json: 包索引（App 端 PM 用，老接口兼容）
           - bootstrap-version.json: bootstrap 版本信息（App 端 OTA 升级用）
-          - packages/*.tar.gz: 单独包归档（按需安装）
-          - wheels/*.whl: 39 个 wheel（numpy/pandas/scipy/pygame/ujson 等常用库，pip install 用）
-          - wheels-index.json: wheel 索引（App 端 PM 用）" \
+          - packages/*.deb: 单独 Debian 包归档（与 apt-repo 一致，按需安装）
+          - wheels/*.whl: wheel 文件（与 pip-repo 一致）
+          - wheels-index.json: wheel 索引（App 端 PM 用，老接口兼容）
+
+          ## apt 仓库（GitHub Pages）
+
+          https://xion-hn.github.io/haisa-des-repo/apt-repo/
+
+          设备端 sources.list 已指向此地址（apt 包安装时自动配置）。
+          按首字母布局: \`pool/main/<首字母>/<包名>/<deb>\`
+
+          ## pip 仓库（PEP 503，GitHub Pages）
+
+          https://xion-hn.github.io/haisa-des-repo/pip/simple/
+
+          设备端: \`pip install --index-url https://xion-hn.github.io/haisa-des-repo/pip/simple/ <pkg>\`
+          按首字母布局: \`simple/<首字母>/<规范化包名>/index.html\`" \
               --draft
           fi
 
           # 上传资产（同名会覆盖，便于重试）
-          # prod 变体已构建全部 39 个 wheel + wheels-index.json
+          # 注意: apt-repo/ 和 pip-repo/ 不上传到 Releases，部署到 gh-pages 分支（见下个 step）
           gh release upload "$TAG" --repo "$REPO" \
             bootstrap-arm64-v8a.zip \
             packages.json \
             bootstrap-version.json \
-            packages/*.tar.gz \
+            packages/*.deb \
             wheels/*.whl \
             wheels-index.json \
             --clobber
@@ -157,11 +204,101 @@ jobs:
           # 发布（去 draft）+ 标记为 latest（确保 releases/latest/download/ 指向最新版）
           gh release edit "$TAG" --repo "$REPO" --draft=false --latest
 
-          echo "✓ 已发布 $TAG 到 $REPO"
+          echo "✓ 已发布 $TAG 到 $REPO Releases"
           echo "  下载链接（公开）:"
           echo "    https://github.com/$REPO/releases/latest/download/bootstrap-arm64-v8a.zip"
           echo "    https://github.com/$REPO/releases/latest/download/packages.json"
           echo "    https://github.com/$REPO/releases/latest/download/bootstrap-version.json"
+
+      # -----------------------------------------------------------
+      # tag 触发: 部署 apt-repo/ 和 pip-repo/ 到 haisa-des-repo 的 gh-pages 分支
+      # GitHub Pages 自动从 gh-pages 分支构建静态站点
+      # URL: https://xion-hn.github.io/haisa-des-repo/{apt-repo,pip}/...
+      # -----------------------------------------------------------
+      - name: Deploy apt-repo + pip-repo to haisa-des-repo gh-pages
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.variant == 'prod'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::secrets.RELEASE_REPO_TOKEN 未配置（需 haisa-des-repo 的 PAT，contents:write 权限）"
+            exit 1
+          fi
+
+          REPO="XION-HN/haisa-des-repo"
+          git config --global user.name "haisa-des-ci"
+          git config --global user.email "ci@haisa-des.local"
+
+          # 浅克隆 gh-pages 分支（首次不存在则创建空分支）
+          CLONE_DIR="$(mktemp -d)"
+          git clone --quiet --depth 1 --branch gh-pages \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+            "$CLONE_DIR" 2>/dev/null || {
+            # gh-pages 不存在，从默认分支创建
+            git clone --quiet --depth 1 \
+              "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+              "$CLONE_DIR"
+            cd "$CLONE_DIR"
+            git checkout --orphan gh-pages
+            git rm -rf . 2>/dev/null || true
+            cd - >/dev/null
+          }
+
+          cd "$CLONE_DIR"
+
+          # 清空旧 apt-repo/ pip-repo/（保证幂等，元数据每次重生成）
+          rm -rf apt-repo pip-repo
+
+          # 拷新构建的 apt-repo/ 和 pip-repo/
+          cp -r "$GITHUB_WORKSPACE/build-system/dist/apt-repo" ./apt-repo
+          cp -r "$GITHUB_WORKSPACE/build-system/dist/pip-repo" ./pip-repo
+
+          # 写顶层 README（用 printf 避免 YAML 缩进污染内容）
+          printf '%s\n' \
+            "# haisa-des repository (gh-pages)" \
+            "" \
+            "This branch hosts the static files served by GitHub Pages." \
+            "Last updated: ${TAG} ($(date -u +%Y-%m-%dT%H:%M:%SZ))" \
+            "" \
+            "## Layout" \
+            "" \
+            "- \`apt-repo/\` — Debian package repository" \
+            "  - \`dists/stable/Release\`, \`InRelease\`, \`Release.gpg\`" \
+            "  - \`dists/stable/main/binary-aarch64/Packages\`, \`Packages.gz\`" \
+            "  - \`pool/main/<首字母>/<包名>/<deb>\`" \
+            "" \
+            "- \`pip-repo/\` — PEP 503 Python simple index" \
+            "  - \`simple/index.html\`" \
+            "  - \`simple/<首字母>/<规范化包名>/index.html\` + wheel files" \
+            "" \
+            "## Sources" \
+            "" \
+            "- Bootstrap + Release assets: https://github.com/${REPO}/releases/latest" \
+            "- Build system: https://github.com/XION-HN/haisa-des-bootstrap" \
+            > README.md
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "gh-pages 无变化，跳过 push"
+          else
+            git commit -m "chore(gh-pages): deploy apt-repo + pip-repo for ${TAG}
+
+          - Sources: haisa-des-bootstrap tag ${TAG}
+          - apt-repo: $(find apt-repo -name '*.deb' | wc -l) debs
+          - pip-repo: $(find pip-repo -name '*.whl' | wc -l) wheels"
+            git push --quiet origin gh-pages
+            echo "✓ gh-pages 已部署"
+          fi
+
+          cd - >/dev/null
+          rm -rf "$CLONE_DIR"
+
+          echo ""
+          echo "GitHub Pages URL:"
+          echo "  apt: https://xion-hn.github.io/haisa-des-repo/apt-repo/dists/stable/Release"
+          echo "  pip: https://xion-hn.github.io/haisa-des-repo/pip/simple/"
 
   # -----------------------------------------------------------
   # wheels job：仅 push to main 时跑，快速验证 download 方法的 wheel URL 仍可用
