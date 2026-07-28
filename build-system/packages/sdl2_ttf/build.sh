@@ -2,7 +2,7 @@
 PKG_NAME="sdl2_ttf"
 PKG_VERSION="2.22.0"
 PKG_SRC_URL="https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.22.0/SDL2_ttf-2.22.0.tar.gz"
-PKG_SRC_SHA256=""
+PKG_SRC_SHA256="0131c57d44ed8847d4956b3a4bf07959d27ff0c443d468c95eac66b5bb79d9a0"
 PKG_SRC_DIR="SDL2_ttf-2.22.0"
 
 pkg_build() {

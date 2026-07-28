@@ -2,7 +2,7 @@
 PKG_NAME="sdl2"
 PKG_VERSION="2.30.10"
 PKG_SRC_URL="https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.tar.gz"
-PKG_SRC_SHA256=""
+PKG_SRC_SHA256="f59adf36a0fcf4c94198e7d3d776c1b3824211ab7aeebeb31fe19836661196aa"
 PKG_SRC_DIR="SDL2-2.30.10"
 
 pkg_build() {

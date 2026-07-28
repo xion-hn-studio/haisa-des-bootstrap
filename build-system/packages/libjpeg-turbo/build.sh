@@ -2,7 +2,7 @@
 PKG_NAME="libjpeg-turbo"
 PKG_VERSION="3.0.4"
 PKG_SRC_URL="https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.0.4/libjpeg-turbo-3.0.4.tar.gz"
-PKG_SRC_SHA256=""
+PKG_SRC_SHA256="99130559e7d62e8d695f2c0eaeef912c5828d5b84a0537dcb24c9678c9d5b76b"
 PKG_SRC_DIR="libjpeg-turbo-3.0.4"
 
 pkg_build() {

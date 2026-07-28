@@ -2,7 +2,7 @@
 PKG_NAME="freetype"
 PKG_VERSION="2.13.3"
 PKG_SRC_URL="https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz"
-PKG_SRC_SHA256=""
+PKG_SRC_SHA256="0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
 PKG_SRC_DIR="freetype-2.13.3"
 
 pkg_build() {

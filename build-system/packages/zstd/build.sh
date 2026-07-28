@@ -2,7 +2,7 @@
 PKG_NAME="zstd"
 PKG_VERSION="1.5.7"
 PKG_SRC_URL="https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz"
-PKG_SRC_SHA256="37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3"
+PKG_SRC_SHA256="eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
 PKG_SRC_DIR="zstd-1.5.7"
 
 pkg_build() {
