@@ -24,16 +24,23 @@ pkg_prepare_src() {
     extract_pkg "$PKG_NAME" "$PKG_SRC_URL" "$PKG_SRC_DIR"
     local src="$SRC_DIR/$PKG_SRC_DIR"
 
-    # ostable: 添加 linux-android -> linux 映射（如果不存在）
-    if ! grep -q '^linux-android' "$src/data/ostable" 2>/dev/null; then
-        printf 'linux-android\t\t\tlinux\n' >> "$src/data/ostable"
-        log "dpkg: ostable 添加 linux-android 条目"
+    # ostable: 添加 linux-android 条目
+    # 格式: <Debian名>\t<GNU名>\t<正则>
+    # GNU triple aarch64-linux-android 的 OS 部分是 "linux-android"
+    # 正则必须精确匹配 "linux-android"（configure 用 $ 锚尾，"linux" 匹配不到）
+    # Debian 名 "base-bionic-linux" = abi(base)+libc(bionic)+kernel(linux)
+    # gnutriplet_to_debtuple 把 $os split(/-/,3) → ("base","bionic","linux")
+    # 再拼 cpu("arm64") → tuple "base-bionic-linux-arm64"
+    if ! grep -q '^base-bionic-linux' "$src/data/ostable" 2>/dev/null; then
+        printf 'base-bionic-linux\t\tlinux-android\t\tlinux-android\n' >> "$src/data/ostable"
+        log "dpkg: ostable 添加 base-bionic-linux 条目"
     fi
 
-    # tupletable: 添加 aarch64-linux-android -> arm64 映射（如果不存在）
-    if ! grep -q '^aarch64-linux-android' "$src/data/tupletable" 2>/dev/null; then
-        printf 'aarch64-linux-android\t\t\tarm64\n' >> "$src/data/tupletable"
-        log "dpkg: tupletable 添加 aarch64-linux-android 条目"
+    # tupletable: 把 Debian tuple 映射到 Debian arch name
+    # 我们的 .deb 用 Architecture: aarch64（Termux 惯例），所以映射到 aarch64
+    if ! grep -q '^base-bionic-linux-arm64' "$src/data/tupletable" 2>/dev/null; then
+        printf 'base-bionic-linux-arm64\t\taarch64\n' >> "$src/data/tupletable"
+        log "dpkg: tupletable 添加 base-bionic-linux-arm64 → aarch64 映射"
     fi
 }
 

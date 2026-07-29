@@ -454,6 +454,78 @@ libmd)           echo "" ;;
 
 ---
 
+## 坑 8.6：dpkg 架构探测失败（ostable/tupletable 格式错误）
+
+**包**：dpkg 1.22.22
+**对应文件**：[packages/dpkg/build.sh](file:///workspace/haisa-des-bootstrap/build-system/packages/dpkg/build.sh)
+
+### 现象
+
+dpkg configure 在 libmd 检测通过后报：
+```
+configure: error: cannot determine host dpkg architecture
+```
+
+### 根因
+
+dpkg configure 运行 `dpkg-architecture.pl -taarch64-linux-android -qDEB_HOST_ARCH` 来确定 Debian 架构名。这个 perl 脚本通过两步映射：
+
+1. **ostable**：GNU triple OS 部分 → Debian OS 名
+   - 格式：`<Debian名>\t<GNU名>\t<正则>`
+   - 脚本用 `^(.*-)?$regex$` 锚尾匹配，regex 必须精确匹配 `linux-android`
+   - 旧条目 `linux-android\t\t\tlinux` 的 regex 是 `linux`，被 `$` 锚尾后匹配不到 `linux-android`
+
+2. **tupletable**：Debian tuple（`abi-libc-os-cpu`）→ Debian arch name
+   - 格式：`<Debian tuple>\t<Debian arch>`
+   - 旧条目 `aarch64-linux-android\t\t\tarm64` 用的是 GNU triple 而非 Debian tuple，完全无效
+
+### 解决
+
+正确格式的 ostable 条目（[build.sh:34-37](file:///workspace/haisa-des-bootstrap/build-system/packages/dpkg/build.sh#L34-L37)）：
+
+```bash
+# Debian 名 "base-bionic-linux" = abi(base)+libc(bionic)+kernel(linux)
+# gnutriplet_to_debtuple 把 $os split(/-/,3) → ("base","bionic","linux")
+# 再拼 cpu("arm64") → tuple "base-bionic-linux-arm64"
+printf 'base-bionic-linux\t\tlinux-android\t\tlinux-android\n' >> "$src/data/ostable"
+```
+
+正确的 tupletable 条目（[build.sh:41-43](file:///workspace/haisa-des-bootstrap/build-system/packages/dpkg/build.sh#L41-L43)）：
+
+```bash
+# .deb 用 Architecture: aarch64（Termux 惯例），映射到 aarch64
+printf 'base-bionic-linux-arm64\t\taarch64\n' >> "$src/data/tupletable"
+```
+
+### 映射流程详解
+
+```
+GNU triple: aarch64-linux-android
+    ↓ gnutriplet_to_debtuple()
+    ↓ cputable: "aarch64" → cpu="arm64"
+    ↓ ostable:  "linux-android" regex match → os="base-bionic-linux"
+    ↓ split(/-/,3): ("base","bionic","linux") + ("arm64")
+    ↓
+Debian tuple: base-bionic-linux-arm64
+    ↓ debtuple_to_debarch()
+    ↓ tupletable lookup: "base-bionic-linux-arm64" → "aarch64"
+    ↓
+Debian arch: aarch64
+```
+
+### 通用规律
+
+**dpkg 的 ostable/tupletable 不是简单的"GNU triple → arch"映射**，而是两步：
+1. ostable 把 GNU triple 的 OS 部分（如 `linux-android`）映射到 Debian OS 名（如 `base-bionic-linux`），这个名字会被 split 成 `abi-libc-kernel` 三元组
+2. tupletable 把完整 Debian tuple（`abi-libc-kernel-cpu`，如 `base-bionic-linux-arm64`）映射到 Debian arch name（如 `aarch64`）
+
+**关键易错点**：
+- ostable 的 regex 被 `$` 锚尾，`linux` 匹配不到 `linux-android`
+- tupletable 的 key 是 Debian tuple（`base-bionic-linux-arm64`），不是 GNU triple
+- Debian arch name 必须和 .deb 文件的 `Architecture:` 字段一致（我们用 `aarch64`）
+
+---
+
 ## 坑 9：SDL2 pkg-config 返回设备路径
 
 **包**：sdl2_image / sdl2_mixer / sdl2_ttf
