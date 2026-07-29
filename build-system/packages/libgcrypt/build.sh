@@ -11,6 +11,12 @@ pkg_build() {
     # 避免空值产生尾随冒号导致 pkg-config 误搜索当前目录。
     export PKG_CONFIG_PATH="$STAGE_DIR$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
+    # libgpg-error 1.51 安装的 gpg-error-config 是 perl 脚本，
+    # 交叉编译时 shebang 指向 host perl 无法执行（CI 报 "No such file or directory"）。
+    # 直接导出 CFLAGS/LIBS 绕过 gpg-error-config 调用（AM_PATH_GPG_ERROR 优先用环境变量）。
+    export GPG_ERROR_CFLAGS="-I$STAGE_DIR$PREFIX/include"
+    export GPG_ERROR_LIBS="-L$STAGE_DIR$PREFIX/lib -lgpg-error"
+
     # --with-libgpg-error-prefix 指向刚编译的 libgpg-error staging
     # --disable-asm：Android bionic 汇编兼容性问题
     gnu_configure \

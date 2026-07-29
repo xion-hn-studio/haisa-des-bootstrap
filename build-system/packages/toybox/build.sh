@@ -19,6 +19,10 @@ pkg_build() {
     for opt in AWK TR; do
         sed -i "s/^# CONFIG_${opt} is not set/CONFIG_${opt}=y/" .config
     done
+    # 禁用 GETCONF：getconf.c 包含 <libintl.h>（国际化），
+    # NDK 无此头文件（Termux 由 libandroid-support 提供）。
+    # Android 自带 getconf，禁用无影响。
+    sed -i "s/^CONFIG_GETCONF=y/# CONFIG_GETCONF is not set/" .config
     make -j"$JOBS" CC="$CC" STRIP="$STRIP"
 
     # toybox 的 make install 会运行 ./toybox --install 创建命令符号链接，
