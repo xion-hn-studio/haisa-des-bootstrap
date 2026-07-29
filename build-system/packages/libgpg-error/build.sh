@@ -36,4 +36,28 @@ pkg_build() {
         --disable-doc
     make -j"$JOBS"
     stage_install
+
+    # 上游安装的 bin/gpg-error-config 是 perl 脚本，shebang 指向安装时
+    # 的 perl（如 /data/data/com.termux/files/usr/bin/perl 或 CI host 的 perl）。
+    # 交叉编译下游包（libgcrypt）configure 要执行此脚本取 CFLAGS/LIBS，
+    # 但 perl shebang 在执行环境可能不存在 → "No such file or directory"。
+    # 用 host 可执行的 POSIX sh wrapper 替换：写死 $STAGE_DIR$PREFIX 绝对路径
+    # （merge_stage 后下游从 $STAGE_DIR$PREFIX/bin/ 调用，路径有效）。
+    # 不依赖 perl，跨 host（CI runner、Termux、其他设备）一致可执行。
+    local bindir="$PKG_STAGE$PREFIX/bin"
+    local stage_prefix="$STAGE_DIR$PREFIX"
+    cat > "$bindir/gpg-error-config" <<EOF
+#!/bin/sh
+# haisa-des 交叉编译 wrapper：替代上游 perl 版 gpg-error-config。
+case "\$1" in
+    --version) echo "$PKG_VERSION" ;;
+    --cflags)  echo "-I$stage_prefix/include" ;;
+    --libs)    echo "-L$stage_prefix/lib -lgpg-error" ;;
+    --prefix)  echo "$stage_prefix" ;;
+    --host)    echo "aarch64-unknown-linux-android" ;;
+    *)         echo "-I$stage_prefix/include -L$stage_prefix/lib -lgpg-error" ;;
+esac
+EOF
+    chmod 755 "$bindir/gpg-error-config"
+    log "libgpg-error: 替换 gpg-error-config 为 sh wrapper（绕过 perl shebang）"
 }
