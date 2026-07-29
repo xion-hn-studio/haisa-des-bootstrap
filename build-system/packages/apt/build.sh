@@ -13,7 +13,7 @@
 PKG_NAME="apt"
 PKG_VERSION="2.8.1"
 PKG_SRC_URL="https://salsa.debian.org/apt-team/apt/-/archive/2.8.1/apt-2.8.1.tar.bz2"
-PKG_SRC_SHA256="b5c322daa0889e412ce5912024051fa322825999ab72bb429e53acd7667c9164"
+PKG_SRC_SHA256="87ca18392c10822a133b738118505f7d04e0b31ba1122bf5d32911311cb2dc7e"
 PKG_SRC_DIR="apt-2.8.1"
 
 pkg_prepare_src() {
