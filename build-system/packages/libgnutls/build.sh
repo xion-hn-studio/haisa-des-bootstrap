@@ -17,7 +17,10 @@ pkg_build() {
     export LIBTASN1_LIBS="-L$STAGE_DIR$PREFIX/lib -ltasn1"
     export LIBIDN2_CFLAGS="-I$STAGE_DIR$PREFIX/include"
     export LIBIDN2_LIBS="-L$STAGE_DIR$PREFIX/lib -lidn2"
-    export P11_KIT_CFLAGS="-I$STAGE_DIR$PREFIX/include"
+    # p11-kit 头文件装在 $PREFIX/include/p11-kit-1/p11-kit/，
+    # libgnutls 用 #include <p11-kit/pkcs11.h>，需 -I 指向 p11-kit-1 目录。
+    # pkg-config 返回的 cflags 是设备路径（$PREFIX），CI 时需指向 staging。
+    export P11_KIT_CFLAGS="-I$STAGE_DIR$PREFIX/include/p11-kit-1"
     export P11_KIT_LIBS="-L$STAGE_DIR$PREFIX/lib -lp11-kit"
     export LIBUNISTRING_CFLAGS="-I$STAGE_DIR$PREFIX/include"
     export LIBUNISTRING_LIBS="-L$STAGE_DIR$PREFIX/lib -lunistring"
