@@ -9,7 +9,7 @@
 - **构建方式**：交叉编译（`TOOLCHAIN=ndk`，使用 NDK r29 工具链）
 - **包格式**：Debian `.deb`（ar 归档：debian-binary + control.tar.gz + data.tar.gz）
 - **仓库元数据**：Debian 标准结构（`dists/stable/main/binary-aarch64/Packages[.gz]` + `Release` + `InRelease` GPG 签名）
-- **当前包清单（33 个，按构建顺序）**：
+- **当前包清单（37 个，按构建顺序）**：
   ```
   zlib ncurses bash openssl ca-certificates curl toybox
   libffi sqlite bzip2 xz expat readline
@@ -907,6 +907,78 @@ CMake 的 `find_program` 会从 PATH 找到 `triehash` 并缓存路径。
 
 ---
 
+## 坑 18：CMake FindThreads 在 Android NDK 探测失败
+
+**包**：apt 2.8.1（及其他用 `find_package(Threads)` 的 CMake 包）
+**对应文件**：[packages/apt/build.sh](file:///workspace/haisa-des-bootstrap/build-system/packages/apt/build.sh)
+
+### 现象
+
+CMake configure 输出：
+```
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread - not found
+```
+然后可能直接报错退出，或后续 `find_package(Threads)` 报 `THREADS_NOT_FOUND`。
+
+### 根因
+
+CMake 的 `FindThreads` 模块按顺序探测 pthread 的可用性：
+1. 尝试用 `-pthread` 编译标志 → 看 test program 能否链接
+2. 尝试链接 `pthreads` 库（`-lpthreads`）→ 不存在
+3. 尝试链接 `pthread` 库（`-lpthread`）→ 不存在
+4. 尝试不加任何标志/库 → `pthread_create` 在 libc 里
+
+**Android bionic libc 从 API 21 起把 `libpthread` 合并进了 libc**（`pthread_create` 等函数直接在 `libc.so` 里导出，没有独立的 `libpthread.so`）。所以步骤 2 和 3 必然 "not found"——**这两行是正常的探测输出，不代表失败**。
+
+真正的问题在于：
+- 交叉编译时 CMake 的 `check_cxx_source_compiles` 只编译+链接 test program（不运行），理论上步骤 4 应该成功（libc 总是链接的）
+- 但某些 CMake 版本 / NDK 组合下，步骤 1 的 `-pthread` 标志探测可能因 clang 的 `-pthread` 处理差异而失败，且步骤 4 的 fallback 在交叉编译时可能被跳过
+- 结果 `FindThreads` 报告 `THREADS_FOUND=FALSE`，apt 的 CMakeLists.txt 因 `find_package(Threads REQUIRED)` 而报错
+
+### 解决
+
+在 apt 的 cmake 命令里预置 cache 变量，告诉 FindThreads 跳过库探测（[build.sh](file:///workspace/haisa-des-bootstrap/build-system/packages/apt/build.sh) 的 cmake 参数）：
+
+```bash
+cmake .. \
+    ...
+    # Android bionic 把 pthread 合并进 libc（API 21+），没有独立 libpthread.so
+    # FindThreads 探测 libpthread/libpthreads 会 "not found"（正常），
+    # 但某些 CMake 版本交叉编译时不回退到 "no library" 分支导致 THREADS_NOT_FOUND
+    # 预置 cache 变量跳过库探测，直接声明 pthread_create 可用
+    -DCMAKE_HAVE_PTHREAD_CREATE=ON \
+    ...
+```
+
+**`CMAKE_HAVE_PTHREAD_CREATE=ON`** 的作用：FindThreads 看到这个 cache 变量后跳过 `check_library_exists(pthread pthread_create)` 探测，直接认为 pthread 可用且不需要额外的线程库（`CMAKE_THREAD_LIBS_INIT=""`）。这对 bionic 完全正确——pthread 函数确实在 libc 里，不需要 `-lpthread`。
+
+### 验证
+
+设置后 CMake configure 应输出：
+```
+-- Looking for pthread_create in pthreads - not found   ← 正常，bionic 无 libpthreads
+-- Looking for pthread_create in pthread - not found     ← 正常，bionic 无独立 libpthread
+-- Found Threads: TRUE                                   ← FindThreads 成功（用了 cache 变量）
+```
+
+### 通用规律
+
+**Android bionic 的 pthread 是 libc 的一部分**，不存在独立 `libpthread.so`。CMake 的 FindThreads 模块设计时假设了 Linux glibc 的库布局（有独立 libpthread）。交叉编译时：
+
+1. `Looking for pthread_create in pthreads/pthread - not found` 是**正常的探测输出**，不要被吓到
+2. 只有当 FindThreads 最终报 `THREADS_NOT_FOUND` / `Threads not found` 才是真正的失败
+3. 修复方式：`-DCMAKE_HAVE_PTHREAD_CREATE=ON` 跳过库探测
+
+**类似的 bionic 库合并问题**：
+- `librt` → 合并进 libc（`clock_gettime` 等直接在 libc）
+- `libdl` → 合并进 libc（`dlopen` 等直接在 libc，API 21+）
+- `libm` → 合并进 libc（部分数学函数）
+
+遇到 CMake 的 `find_library` / `check_library_exists` 对这些库报 "not found" 时，用对应的 cache 变量绕过，或确认是否真的需要链接。
+
+---
+
 ## 快速排查指南
 
 ### CI 失败时的诊断流程
@@ -914,13 +986,17 @@ CMake 的 `find_program` 会从 PATH 找到 `triehash` 并缓存路径。
 1. **看失败步骤**：`gh run view <run-id> --repo <repo> | jq '.jobs[] | select(.conclusion=="failure") | .steps[] | select(.conclusion=="failure")'`
 2. **下载日志**：`gh run view <run-id> --log-failed`（只看失败步骤，比全量 log 小得多）
 3. **grep 关键错误**：
-   - `configure: error` → 依赖检测问题（见坑 2/3/4/6/7/8）
+   - `configure: error` → 依赖检测问题（见坑 2/3/4/6/7/8/8.6）
    - `unable to find library -l<dep>` → LDFLAGS 问题（见坑 13）
    - `file not found` → CFLAGS/pkg-config 路径问题（见坑 9）
    - `undefined symbol: main` → SDL2 宏问题（见坑 10）
    - `not a valid libtool archive` → .la 文件路径问题（见坑 5）
    - `sha256 校验失败` → 上游 repackage（见坑 11）
    - `下载失败` + 502/504 → 网络问题（见坑 12）
+   - `Could not find triehash` → 缺少构建工具（见坑 17）
+   - `Looking for pthread_create.*not found` → bionic pthread 合并（见坑 18，注意单行 not found 是正常探测）
+   - `cannot determine host dpkg architecture` → ostable/tupletable 格式（见坑 8.6）
+   - `未知包:` → 新增包忘记加 pkg_deps 分支（见坑 8.5）
 
 ### 本地验证单个包
 

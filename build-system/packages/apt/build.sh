@@ -79,7 +79,12 @@ pkg_build() {
         -DUSE_NLS=OFF \
         -DWITH_DOC=OFF \
         -DWITH_DOC_MANPAGES=ON \
-        -DPERL_EXECUTABLE="$(command -v perl || echo /bin/false)"
+        -DPERL_EXECUTABLE="$(command -v perl || echo /bin/false)" \
+        -DCMAKE_HAVE_PTHREAD_CREATE=ON
+    # ^ bionic 把 pthread 合并进 libc（API 21+），无独立 libpthread.so
+    #   FindThreads 探测 libpthread 会 "not found"（正常），但交叉编译时
+    #   某些 CMake 版本不回退到 "no library" 分支导致 THREADS_NOT_FOUND
+    #   预置 cache 变量跳过库探测（详见 docs/compile-pitfalls.md 坑 18）
     make -j"$JOBS"
     make install DESTDIR="$PKG_STAGE"
 
