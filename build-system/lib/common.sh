@@ -35,7 +35,11 @@ fetch_pkg() {
             rm -f "$file"
         fi
         log "$name: 下载 $url"
-        curl -fSL --retry 3 --connect-timeout 30 -o "$file" "$url" || die "$name 下载失败: $url"
+        # --retry 5 --retry-delay 5：5 次重试 + 指数退避（5/10/20/40/80s ≈ 2.5 分钟）
+        # 应对 savannah/sourceforge 等镜像临时 502/504 网关错误（实测可持续数分钟）
+        # --retry-all-errors：对 HTTP 5xx 错误也重试（curl 默认只对连接错误重试）
+        curl -fSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+            -o "$file" "$url" || die "$name 下载失败: $url"
     fi
     if [ -n "$sha" ]; then
         echo "$sha  $file" | sha256sum -c - >/dev/null 2>&1 || die "$name sha256 校验失败"
