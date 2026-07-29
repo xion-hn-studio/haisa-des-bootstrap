@@ -14,8 +14,9 @@ pkg_build() {
     # CFLAGS 没传给 make，virtual.c 编译时找不到头文件）
     export FFI_CFLAGS="-I$STAGE_DIR$PREFIX/include"
     export FFI_LIBS="-L$STAGE_DIR$PREFIX/lib -lffi"
-    # 备用：直接加到 CFLAGS 兜底（p11-kit 0.25 的 configure 不一定用 FFI_CFLAGS）
+    # 备用：直接加到 CFLAGS/LDFLAGS 兜底（p11-kit 0.25 configure 不一定用 FFI_CFLAGS）
     export CFLAGS="$CFLAGS -I$STAGE_DIR$PREFIX/include"
+    export LDFLAGS="$LDFLAGS -L$STAGE_DIR$PREFIX/lib"
 
     gnu_configure \
         --disable-trust-module \
