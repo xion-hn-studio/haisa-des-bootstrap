@@ -22,6 +22,15 @@ pkg_build() {
     export LIBUNISTRING_CFLAGS="-I$STAGE_DIR$PREFIX/include"
     export LIBUNISTRING_LIBS="-L$STAGE_DIR$PREFIX/lib -lunistring"
 
+    # AC_CHECK_FUNCS 在交叉编译时无法运行 test program 检测符号存在性，
+    # libgnutls configure 会因 "nettle_rsa_sec_decrypt not found" 失败。
+    # 用 cache 变量 ac_cv_func_<func>=yes 跳过运行时检测。
+    # nettle 3.10 确实有这些符号（rsa.h:97 宏重命名 rsa_* → nettle_rsa_*）。
+    export ac_cv_func_nettle_rsa_sec_decrypt=yes
+    export ac_cv_func_nettle_rsa_oaep_sha256_encrypt=yes
+    # AC_CHECK_LIB(hogweed, nettle_get_secp_192r1) 同问题
+    export ac_cv_lib_hogweed_nettle_get_secp_192r1=yes
+
     # disable 大量子模块简化编译：tools/cxx/doc/tests/libdane/hardware-acceleration
     # --with-included-unistring: gnulib AM_LIB_UNISTRING 交叉编译时无法运行
     # test program 检测 u8_normalize，"Libunistring was not found"。
