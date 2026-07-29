@@ -46,6 +46,11 @@ pkg_prepare_src() {
 
 pkg_build() {
     # apt 用 CMake 构建
+    # triehash: apt 的 CMakeLists.txt 用 find_program(TRIEHASH_EXECUTABLE NAMES triehash)
+    # 找 triehash 脚本生成完美哈希。CI 主机未预装，vendor 在 lib/triehash。
+    # 加到 PATH 让 CMake 能找到。
+    export PATH="$BS_ROOT/lib:$PATH"
+
     mkdir -p build && cd build
 
     # CMAKE_LIBRARY_PATH: 添加系统库路径

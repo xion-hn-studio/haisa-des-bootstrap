@@ -871,6 +871,42 @@ verify_dynload_needed() {
 
 ---
 
+## 坑 17：apt 缺少 triehash 工具
+
+**包**：apt 2.8.1
+**对应文件**：[packages/apt/build.sh](file:///workspace/haisa-des-bootstrap/build-system/packages/apt/build.sh) + [lib/triehash](file:///workspace/haisa-des-bootstrap/build-system/lib/triehash)
+
+### 现象
+
+```
+CMake Error at CMakeLists.txt:51 (message):
+  Could not find triehash executable
+```
+
+### 根因
+
+apt 的 CMakeLists.txt 用 `find_program(TRIEHASH_EXECUTABLE NAMES triehash)` 找 `triehash` 脚本。这个 Perl 脚本生成完美哈希函数（用于包名快速查找），**不在 apt 源码包内**，是独立的工具（Debian 包 `triehash` / CPAN `App::TrieHash`）。CI runner 上没有预装。
+
+### 解决
+
+1. 把 triehash 脚本 vendor 到构建系统 `lib/triehash`（来自 https://github.com/julian-klode/triehash）
+2. 在 apt 的 build.sh 里把 `lib/` 加到 PATH（[build.sh:49-52](file:///workspace/haisa-des-bootstrap/build-system/packages/apt/build.sh#L49-L52)）：
+
+```bash
+export PATH="$BS_ROOT/lib:$PATH"
+```
+
+CMake 的 `find_program` 会从 PATH 找到 `triehash` 并缓存路径。
+
+### 通用规律
+
+**CMake 的 find_program / find_file 是隐式依赖**——不写在 CMakeLists.txt 的 `find_package` 里，容易被遗漏。遇到 `Could not find <tool>` 错误时：
+1. 确认工具是 build-time 工具（只在编译主机运行，不需要交叉编译）还是 target 工具
+2. build-time 工具直接加到 PATH 或用 `-D<tool>_EXECUTABLE=/path/to/tool` 指定
+3. 如果工具不在系统包里，vendor 到构建系统的 `lib/` 目录
+
+---
+
 ## 快速排查指南
 
 ### CI 失败时的诊断流程
