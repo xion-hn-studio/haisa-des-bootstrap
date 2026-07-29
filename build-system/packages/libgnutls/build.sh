@@ -23,7 +23,11 @@ pkg_build() {
     export LIBUNISTRING_LIBS="-L$STAGE_DIR$PREFIX/lib -lunistring"
 
     # disable 大量子模块简化编译：tools/cxx/doc/tests/libdane/hardware-acceleration
+    # --with-included-unistring: gnulib AM_LIB_UNISTRING 交叉编译时无法运行
+    # test program 检测 u8_normalize，"Libunistring was not found"。
+    # 用源码自带的 libunistring 副本静态链接，避免依赖检测。
     gnu_configure \
+        --with-included-unistring \
         --disable-doc \
         --disable-tests \
         --disable-tools \
