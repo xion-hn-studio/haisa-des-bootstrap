@@ -40,6 +40,13 @@ pkg_prepare_src() {
 pkg_build() {
     # dpkg 的 libdpkg 不支持共享库，必须 --disable-shared --enable-static
     # gnu_configure 默认 --disable-static --enable-shared，不能直接用，显式写 configure
+    #
+    # libmd 路径：dpkg configure AC_CHECK_LIB(md, MD5Init) 探测 BSD MD5 函数，
+    # Android bionic 不导出，必须显式指向 staging 里的 libmd 头文件和库。
+    export CFLAGS="$CFLAGS -I$STAGE_DIR$PREFIX/include"
+    export LDFLAGS="$LDFLAGS -L$STAGE_DIR$PREFIX/lib"
+    # AC_CHECK_LIB 默认 -lmd + LIBS，绕过交叉链接器对 staging 路径不可见的问题
+    export LIBS="-lmd"
     ./configure \
         --host="$TARGET_TRIPLE" \
         --prefix="$PREFIX" \

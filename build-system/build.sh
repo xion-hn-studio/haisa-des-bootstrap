@@ -20,15 +20,15 @@ source "$BS_ROOT/lib/common.sh"
 # 用于支持设备端 pip 安装 pygame 等图形库 wheel（无需 gcc）
 # M3.2 扩展：apt 命令行（包管理器 CLI，Debian apt 风格）
 # M3.3 扩展：pip wrapper 已合并到 python 包内（python 包 build 时一并安装 wrapper + pip.real）
-# M4 扩展：真 apt 2.8.1 + dpkg + 13 个依赖库（liblz4/zstd/xxhash/libiconv/
-#          libgpg-error/libgcrypt/gmp/nettle/libtasn1/p11-kit/libunistring/libidn2/libgnutls）
+# M4 扩展：真 apt 2.8.1 + dpkg + 14 个依赖库（liblz4/zstd/xxhash/libiconv/
+#          libgpg-error/libgcrypt/gmp/nettle/libtasn1/p11-kit/libunistring/libidn2/libgnutls/libmd）
 ALL_PACKAGES="zlib ncurses bash openssl ca-certificates curl toybox \
               libffi sqlite bzip2 xz expat readline \
               liblz4 zstd xxhash libiconv \
               libgpg-error libgcrypt \
               gmp nettle libtasn1 p11-kit libunistring libidn2 libgnutls \
               libpng libjpeg-turbo freetype sdl2 sdl2_image sdl2_mixer sdl2_ttf \
-              python dpkg apt"
+              python libmd dpkg apt"
 
 # 内置包：打进 bootstrap.zip 的包（不打单独 .deb，也不进 Packages 索引）
 # M4 后 apt 改为真 apt 编译，打 .deb；bootstrap.zip 只含最小运行时（手动指定）
@@ -77,8 +77,8 @@ pkg_deps() {
         libunistring)    echo "" ;;
         libidn2)         echo "libunistring" ;;
         libgnutls)       echo "gmp nettle libtasn1 p11-kit libunistring libidn2" ;;
-        # dpkg：静态库，无构建依赖
-        dpkg)            echo "" ;;
+        # dpkg：静态库；依赖 libmd（BSD 风格 MD5Init/MD5Update/MD5Final）
+        dpkg)            echo "libmd" ;;
         # apt：真 Debian apt 2.8.1，依赖 dpkg + TLS/压缩库
         apt)             echo "dpkg liblz4 zstd xxhash libiconv libgcrypt libgnutls" ;;
         *) die "未知包: $1" ;;
