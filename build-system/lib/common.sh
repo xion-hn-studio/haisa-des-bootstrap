@@ -91,26 +91,36 @@ stage_install() {
 }
 
 # fix_la_paths：改写当前包 staging 内所有 .la 文件的 libdir
-# libtool 生成的 .la 文件里 libdir=$PREFIX/lib（设备路径），
-# 下游包 libtool 链接时会读 .la 找依赖库路径，CI 主机上 $PREFIX
-# 不存在导致 "libxxx.la is not a valid libtool archive"。
-# 改写为 staging 实际路径（merge_stage 后下游从 STAGE_DIR$PREFIX 访问）。
+# libtool 生成的 .la 文件里 libdir 可能是两种值：
+#   1. 设备路径 $PREFIX/lib（--prefix 指定的设备路径，libtool 默认行为）
+#   2. per-pkg-stage 路径 $PKG_STAGE$PREFIX/lib（libtool --mode=install 写入的 install 目标）
+# 下游包 libtool 链接时会读 .la 找依赖库路径，CI 主机上设备路径不存在导致
+# "libxxx.la is not a valid libtool archive"。改写为 staging 实际路径
+# （merge_stage 后下游从 STAGE_DIR$PREFIX 访问）。
 #
-# 关键：STAGE_DIR 路径包含 $PREFIX/lib 子串，所以不能用全局 s|$PREFIX/lib|...|g
-# 否则会把已替换过的 STAGE_DIR$PREFIX/lib 中的 $PREFIX/lib 再次替换，导致
-# 路径无限嵌套（STAGE_DIR$STAGE_DIR$PREFIX/lib...）。
-# 用 perl negative lookbehind：只替换前面不是 STAGE_DIR 的 $PREFIX/lib。
+# 关键难点：$stage_libdir = $STAGE_DIR + $dev_libdir，包含 $dev_libdir 子串。
+# 直接 s{$dev_libdir}{$stage_libdir}g 会把 $stage_libdir 内的 $dev_libdir 也替换，
+# 导致 $STAGE_DIR$STAGE_DIR$PREFIX/lib 双重前缀。
+# 同样 $pkg_stage_libdir = $PKG_STAGE + $dev_libdir 也包含 $dev_libdir 子串。
+#
+# 解决：sentinel 三步替换。先把所有"已修复"路径（$stage_libdir / $pkg_stage_libdir）
+# 暂存为 sentinel，再替换 $dev_libdir，最后恢复 sentinel。
+# 这样无论 libdir 原值是设备路径还是 per-pkg-stage 路径都能正确处理。
 fix_la_paths() {
-    local la stage_libdir dev_libdir
+    local la stage_libdir dev_libdir pkg_stage_libdir sentinel
     dev_libdir="$PREFIX/lib"
     stage_libdir="$STAGE_DIR$PREFIX/lib"
+    pkg_stage_libdir="$PKG_STAGE$PREFIX/lib"
+    sentinel="__HAISA_LIBDIR_SENTINEL_5F8A3B__"
     for la in "$PKG_STAGE$PREFIX"/lib/*.la; do
         [ -f "$la" ] || continue
-        # libdir='...' 行：直接替换（libdir= 只出现一次）
-        sed -i "s|^libdir='$dev_libdir'|libdir='$stage_libdir'|" "$la"
-        # dependency_libs 里的 $PREFIX/lib 路径：用 perl 负向后行断言
-        # 只匹配前面不是 STAGE_DIR 的 $PREFIX/lib
-        perl -i -pe "s{(?<!\Q$STAGE_DIR\E)\Q$dev_libdir\E}{$stage_libdir}g" "$la"
+        # libdir='...' 行：强制改为 stage_libdir（不论原值）
+        sed -i "s|^libdir='[^']*'|libdir='$stage_libdir'|" "$la"
+        # dependency_libs 里的路径：sentinel 三步替换避免双重前缀
+        perl -i -pe "s{\\Q$stage_libdir\\E}{$sentinel}g" "$la"
+        perl -i -pe "s{\\Q$pkg_stage_libdir\\E}{$sentinel}g" "$la"
+        perl -i -pe "s{\\Q$dev_libdir\\E}{$stage_libdir}g" "$la"
+        perl -i -pe "s{\\Q$sentinel\\E}{$stage_libdir}g" "$la"
     done
 }
 
