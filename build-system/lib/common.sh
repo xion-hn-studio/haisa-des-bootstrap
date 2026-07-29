@@ -95,14 +95,22 @@ stage_install() {
 # 下游包 libtool 链接时会读 .la 找依赖库路径，CI 主机上 $PREFIX
 # 不存在导致 "libxxx.la is not a valid libtool archive"。
 # 改写为 staging 实际路径（merge_stage 后下游从 STAGE_DIR$PREFIX 访问）。
+#
+# 关键：STAGE_DIR 路径包含 $PREFIX/lib 子串，所以不能用全局 s|$PREFIX/lib|...|g
+# 否则会把已替换过的 STAGE_DIR$PREFIX/lib 中的 $PREFIX/lib 再次替换，导致
+# 路径无限嵌套（STAGE_DIR$STAGE_DIR$PREFIX/lib...）。
+# 用 perl negative lookbehind：只替换前面不是 STAGE_DIR 的 $PREFIX/lib。
 fix_la_paths() {
-    local la libdir_old libdir_new
+    local la stage_libdir dev_libdir
+    dev_libdir="$PREFIX/lib"
+    stage_libdir="$STAGE_DIR$PREFIX/lib"
     for la in "$PKG_STAGE$PREFIX"/lib/*.la; do
         [ -f "$la" ] || continue
-        libdir_new="$STAGE_DIR$PREFIX/lib"
-        sed -i "s|^libdir=.*|libdir='$libdir_new'|" "$la"
-        # dependency_libs 也可能含 $PREFIX 路径，一并改写
-        sed -i "s|$PREFIX/lib|$libdir_new|g" "$la"
+        # libdir='...' 行：直接替换（libdir= 只出现一次）
+        sed -i "s|^libdir='$dev_libdir'|libdir='$stage_libdir'|" "$la"
+        # dependency_libs 里的 $PREFIX/lib 路径：用 perl 负向后行断言
+        # 只匹配前面不是 STAGE_DIR 的 $PREFIX/lib
+        perl -i -pe "s{(?<!\Q$STAGE_DIR\E)\Q$dev_libdir\E}{$stage_libdir}g" "$la"
     done
 }
 
