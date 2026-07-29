@@ -77,6 +77,8 @@ pkg_deps() {
         libunistring)    echo "" ;;
         libidn2)         echo "libunistring" ;;
         libgnutls)       echo "gmp nettle libtasn1 p11-kit libunistring libidn2" ;;
+        # libmd：BSD 风格 MD5/SHA 摘要库，dpkg 硬依赖（bionic 不导出 MD5Init）
+        libmd)           echo "" ;;
         # dpkg：静态库；依赖 libmd（BSD 风格 MD5Init/MD5Update/MD5Final）
         dpkg)            echo "libmd" ;;
         # apt：真 Debian apt 2.8.1，依赖 dpkg + TLS/压缩库
