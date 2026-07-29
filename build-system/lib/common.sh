@@ -90,6 +90,22 @@ stage_install() {
     make install DESTDIR="$PKG_STAGE" "$@"
 }
 
+# fix_la_paths：改写当前包 staging 内所有 .la 文件的 libdir
+# libtool 生成的 .la 文件里 libdir=$PREFIX/lib（设备路径），
+# 下游包 libtool 链接时会读 .la 找依赖库路径，CI 主机上 $PREFIX
+# 不存在导致 "libxxx.la is not a valid libtool archive"。
+# 改写为 staging 实际路径（merge_stage 后下游从 STAGE_DIR$PREFIX 访问）。
+fix_la_paths() {
+    local la libdir_old libdir_new
+    for la in "$PKG_STAGE$PREFIX"/lib/*.la; do
+        [ -f "$la" ] || continue
+        libdir_new="$STAGE_DIR$PREFIX/lib"
+        sed -i "s|^libdir=.*|libdir='$libdir_new'|" "$la"
+        # dependency_libs 也可能含 $PREFIX 路径，一并改写
+        sed -i "s|$PREFIX/lib|$libdir_new|g" "$la"
+    done
+}
+
 # make_deb：把当前包 PKG_STAGE 打成 Debian .deb
 # 参数:
 #   $1 depends  逗号分隔的依赖包列表（可空）

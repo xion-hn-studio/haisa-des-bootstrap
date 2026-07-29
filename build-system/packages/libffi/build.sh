@@ -9,4 +9,5 @@ pkg_build() {
     gnu_configure --disable-builddir
     make -j"$JOBS"
     stage_install
+    # .la 文件 libdir 修正由通用 fix_la_paths（build.sh 调用）统一处理
 }

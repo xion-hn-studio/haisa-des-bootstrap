@@ -114,6 +114,8 @@ build_one() {
         extract_pkg "$name" "$PKG_SRC_URL" "$PKG_SRC_DIR"
     fi
     ( cd "$SRC_DIR/$PKG_SRC_DIR" && pkg_build )
+    # 修复 .la 文件 libdir（交叉编译时 libtool 记录设备路径，CI 主机找不到）
+    fix_la_paths
     merge_stage "$name"
     # 打 .deb（BUILTIN_PACKAGES 不打，打进 bootstrap.zip）
     case " $BUILTIN_PACKAGES " in
