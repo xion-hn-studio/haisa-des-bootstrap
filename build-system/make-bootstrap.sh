@@ -21,15 +21,29 @@ find "$SROOT" -name '*.la' -delete 2>/dev/null || true
 mkdir -p "$SROOT/tmp"
 
 # 1) 记录并剔除符号链接
+#    设计变更（v0.7.1+）: 全部符号链接都剥离到 SYMLINKS.txt，由 App 端
+#    BootstrapInstaller.extractAndPrepare() 用 Os.symlink() 重建。
+#    之前版本仅剥离别名链接、保留 SONAME，但 Python zipfile 无法存储 symlink
+#    （z.write 调 os.stat 跟随符号链接，symlink 目标不存在时报错），
+#    故统一剥离。
+#
+#    App 端重建逻辑见 BootstrapInstaller.java 第 138-155 行:
+#      读取 SYMLINKS.txt 每行 "linkpath\ttarget"
+#      link.delete(); Os.symlink(target, link.getAbsolutePath())
+#    若 App 端 Os.symlink 失败（SELinux/权限），SONAME 链接缺失会导致
+#    "CANNOT LINK EXECUTABLE" 或 "Method has died unexpectedly"。
+#    修复方向: App 端加错误日志 + fallback 实体文件拷贝（待后续）。
 SYMLINKS_TXT="$STAGE_DIR/SYMLINKS.txt"
 : > "$SYMLINKS_TXT"
+count=0
 while IFS= read -r l; do
     rel="${l#"$SROOT"/}"
     tgt="$(readlink "$l")"
     printf '%s\t%s\n' "$rel" "$tgt" >> "$SYMLINKS_TXT"
     rm -f "$l"
+    count=$((count + 1))
 done < <(find "$SROOT" -type l)
-log "符号链接 $(wc -l < "$SYMLINKS_TXT") 条已记录"
+log "符号链接 $count 条已记录到 SYMLINKS.txt（App 端重建）"
 
 # 2) 打 zip（python3 zipfile，免依赖系统 zip）
 cp "$SYMLINKS_TXT" "$SROOT/SYMLINKS.txt"
