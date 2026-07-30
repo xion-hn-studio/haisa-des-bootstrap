@@ -39,6 +39,11 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "ndk;29.0.14206865"
 
+      # openjdk-17 包用 patchelf 重写 ELF 的 RPATH（Termux prefix → haisa-des prefix）
+      # ubuntu-latest 默认未装 patchelf，需显式安装
+      - name: Install patchelf (for openjdk-17 RPATH rewrite)
+        run: sudo apt-get install -y patchelf
+
       - name: Build all packages
         env:
           VARIANT: ${{ matrix.variant }}

@@ -29,12 +29,19 @@ ALL_PACKAGES="libcxx-shared \
               libgpg-error libgcrypt \
               gmp nettle libtasn1 p11-kit libunistring libidn2 libgnutls \
               libpng libjpeg-turbo freetype sdl2 sdl2_image sdl2_mixer sdl2_ttf \
-              python libmd dpkg apt"
+              python libmd dpkg apt \
+              openjdk-17"
 
 # 内置包：打进 bootstrap.zip 的包（不打单独 .deb，也不进 Packages 索引）
 # M4 后 apt 改为真 apt 编译，打 .deb；bootstrap.zip 只含最小运行时（手动指定）
 # 当前保留空列表：所有包都打 .deb，bootstrap.zip 仍含全部（兼容现有 App 端）
 BUILTIN_PACKAGES=""
+
+# 独立包：只打 .deb，不合并到总 staging（不进 bootstrap.zip）
+# 用于体积大的可选包（如 openjdk-17 约 220MB），用户通过 apt install <pkg> 按需安装。
+# 若合并进总 staging，bootstrap.zip 会膨胀到 300MB+，APK 过大。
+# 这些包的 .deb 仍会上传到 apt-repo，设备端 apt install 可正常拉取。
+STANDALONE_PACKAGES="openjdk-17"
 
 pkg_deps() {
     case "$1" in
@@ -89,6 +96,12 @@ pkg_deps() {
         # zlib/bzip2/xz 是 apt (de)compressor 的 REQUIRED 依赖（find_package ZLIB/BZip2/LZMA）
         # libcxx-shared：apt 用 NDK clang++ 编译，链接 NDK libc++_shared.so（__ndk1 namespace）
         apt)             echo "dpkg liblz4 zstd xxhash libiconv libgcrypt libgnutls zlib bzip2 xz libcxx-shared" ;;
+        # openjdk-17：复用 Termux 预编译 .deb 重打包（非源码编译）
+        # haisa-des 已有的运行时依赖（dpkg Depends 声明）:
+        #   libiconv/libjpeg-turbo/zlib/freetype/libpng/expat/ca-certificates
+        # 额外依赖（libandroid-shmem/alsa-lib/littlecms/fontconfig 等）随 openjdk-17 .deb 一起打包
+        # 这里只声明 haisa-des 已有的包（构建顺序保证 staging 里已有这些 .so）
+        openjdk-17)      echo "libiconv libjpeg-turbo zlib freetype libpng expat ca-certificates" ;;
         *) die "未知包: $1" ;;
     esac
 }
@@ -124,7 +137,12 @@ build_one() {
     ( cd "$SRC_DIR/$PKG_SRC_DIR" && pkg_build )
     # 修复 .la 文件 libdir（交叉编译时 libtool 记录设备路径，CI 主机找不到）
     fix_la_paths
-    merge_stage "$name"
+    # STANDALONE_PACKAGES：只打 .deb，不合并到总 staging（不进 bootstrap.zip）
+    # 用于体积大的可选包（如 openjdk-17），用户通过 apt install 按需安装
+    case " $STANDALONE_PACKAGES " in
+        *" $name "*) log "$name: 独立包，跳过 merge_stage（不进 bootstrap.zip）" ;;
+        *) merge_stage "$name" ;;
+    esac
     # 打 .deb（BUILTIN_PACKAGES 不打，打进 bootstrap.zip）
     case " $BUILTIN_PACKAGES " in
         *" $name "*) log "$name: 内置包，不打 .deb（进 bootstrap.zip）" ;;
@@ -171,7 +189,15 @@ case "$cmd" in
         [ "$targets" = "all" ] && set -- $ALL_PACKAGES || set -- $targets
         order=$(expand_with_deps "$@")
         log "构建顺序: $order  (VARIANT=$VARIANT PREFIX=$PREFIX JOBS=$JOBS)"
-        for p in $order; do build_one "$p"; done
+        for p in $order; do
+            # STANDALONE_PACKAGES（如 openjdk-17）是可选大包，构建失败不阻塞核心 bootstrap。
+            # 核心包（apt/dpkg/python 等）失败仍会退出（set -e）。
+            if case " $STANDALONE_PACKAGES " in *" $p "*) true;; *) false;; esac; then
+                build_one "$p" || warn "$p: 独立包构建失败（不阻塞 bootstrap，后续可单独修复）"
+            else
+                build_one "$p"
+            fi
+        done
         log "全部完成。staging: $STAGE_DIR"
         ;;
     bootstrap)
