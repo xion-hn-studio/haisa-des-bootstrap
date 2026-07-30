@@ -75,6 +75,17 @@ while IFS= read -r so; do
 done < <(find "$SROOT" -name '*.so.*' -type f)
 log "SONAME 实体文件补全: $soname_created 条"
 
+# 1.6) 修正可执行权限
+#   cp -f 拷贝的实体文件继承源权限，staging 里部分 .so 和 apt methods 可能是 600
+#   （非可执行），导致设备端 "Permission denied" 运行 apt methods、加载 .so 失败。
+#   Android 不依赖 unix 权限位加载 .so，但 execve 执行 apt methods 必须有 +x。
+#   统一: bin/ 下所有文件 + lib/ 下所有文件 0755，确保可执行可读。
+#   （lib/ 含 .so/.so.*/静态库/apt methods，0755 对静态库无副作用）
+find "$SROOT/bin" -type f -exec chmod 0755 {} +
+find "$SROOT/lib" -type f -exec chmod 0755 {} +
+[ -d "$SROOT/libexec" ] && find "$SROOT/libexec" -type f -exec chmod 0755 {} +
+log "权限修正: bin/ + lib/ 下所有文件 → 0755"
+
 # 2) 打 zip（python3 zipfile，免依赖系统 zip）
 python3 - "$SROOT" "$OUT" <<'PYEOF'
 import os, sys, zipfile
