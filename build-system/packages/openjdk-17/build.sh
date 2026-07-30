@@ -106,8 +106,8 @@ pkg_prepare_src() {
 
 pkg_build() {
     # cwd = $SRC_DIR/$PKG_SRC_DIR
-    # 目录结构: data/data/com.termux.files/usr/...
-    local src_prefix="data/data/com.termux.files/usr"
+    # 目录结构: data/data/com.termux/files/usr/...
+    local src_prefix="data/data/com.termux/files/usr"
     local jvm_rel="lib/jvm/java-17-openjdk"
     local jvm_dir="$src_prefix/$jvm_rel"
 
