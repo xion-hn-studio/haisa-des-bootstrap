@@ -20,33 +20,62 @@ rm -f "$OUT"
 find "$SROOT" -name '*.la' -delete 2>/dev/null || true
 mkdir -p "$SROOT/tmp"
 
-# 1) 记录并剔除符号链接
-#    设计变更（v0.7.1+）: 全部符号链接都剥离到 SYMLINKS.txt，由 App 端
-#    BootstrapInstaller.extractAndPrepare() 用 Os.symlink() 重建。
-#    之前版本仅剥离别名链接、保留 SONAME，但 Python zipfile 无法存储 symlink
-#    （z.write 调 os.stat 跟随符号链接，symlink 目标不存在时报错），
-#    故统一剥离。
+# 1) 用实体文件替换所有符号链接
+#    设计变更（v0.7.2+）: 不再剥离符号链接到 SYMLINKS.txt，
+#    而是用实体文件拷贝替换所有符号链接。
 #
-#    App 端重建逻辑见 BootstrapInstaller.java 第 138-155 行:
-#      读取 SYMLINKS.txt 每行 "linkpath\ttarget"
-#      link.delete(); Os.symlink(target, link.getAbsolutePath())
-#    若 App 端 Os.symlink 失败（SELinux/权限），SONAME 链接缺失会导致
-#    "CANNOT LINK EXECUTABLE" 或 "Method has died unexpectedly"。
-#    修复方向: App 端加错误日志 + fallback 实体文件拷贝（待后续）。
-SYMLINKS_TXT="$STAGE_DIR/SYMLINKS.txt"
-: > "$SYMLINKS_TXT"
-count=0
+#    原因:
+#    - Python zipfile 不支持存储 symlink（z.write 调 os.stat 跟随符号链接）
+#    - App 端 Os.symlink 在某些 Android 版本因 SELinux 限制失败
+#    - fallback 实体拷贝逻辑需 App 端代码支持，升级链路复杂
+#    - SONAME 链接（libz.so.1 等）缺失会导致 "CANNOT LINK EXECUTABLE"
+#      或 "Method has died unexpectedly"
+#
+#    方案: 用 cp -Lf 跟随符号链接拷贝实体文件，替换所有符号链接。
+#    zip 里全是实体文件，App 端解压后直接可用，不依赖 Os.symlink。
+#    代价: zip 略大（重复 .so 副本），但可靠性优先。
+SYMLINKS_TXT="$SROOT/SYMLINKS.txt"
+: > "$SYMLINKS_TXT"   # 空文件（向后兼容 App 端读取逻辑）
+replaced=0
+failed=0
 while IFS= read -r l; do
-    rel="${l#"$SROOT"/}"
-    tgt="$(readlink "$l")"
-    printf '%s\t%s\n' "$rel" "$tgt" >> "$SYMLINKS_TXT"
-    rm -f "$l"
-    count=$((count + 1))
+    # readlink -f 跟随符号链接链到最终实体文件
+    real="$(readlink -f "$l" 2>/dev/null || true)"
+    if [ -n "$real" ] && [ -f "$real" ]; then
+        rm -f "$l"
+        cp -f "$real" "$l"
+        replaced=$((replaced + 1))
+    else
+        # 无法解析（如指向 staging 外的绝对路径），删除并记录
+        rel="${l#"$SROOT"/}"
+        tgt="$(readlink "$l")"
+        printf '%s\t%s\n' "$rel" "$tgt" >> "$SYMLINKS_TXT"
+        rm -f "$l"
+        failed=$((failed + 1))
+    fi
 done < <(find "$SROOT" -type l)
-log "符号链接 $count 条已记录到 SYMLINKS.txt（App 端重建）"
+log "符号链接处理: 实体替换 $replaced 条, 无法解析删除 $failed 条"
+
+# 1.5) 补全 SONAME 实体文件
+#   staging 里的 .so 文件可能缺少 SONAME 链接（如 libz.so.1.3.1 存在但 libz.so.1 缺失）。
+#   原因: 上一轮 make-bootstrap.sh 可能已 rm 掉符号链接，或 make install 未创建。
+#   ELF NEEDED 字段引用 SONAME（如 libz.so.1），缺失会导致动态链接器找不到库。
+#   方案: 用 readelf 读 SONAME，为每个缺失的创建实体文件拷贝（非符号链接）。
+soname_created=0
+while IFS= read -r so; do
+    soname=$(readelf -d "$so" 2>/dev/null | awk '/SONAME/ {print $NF}' | tr -d '[]')
+    [ -n "$soname" ] || continue
+    dir=$(dirname "$so")
+    link="$dir/$soname"
+    # 仅当 SONAME 文件不存在时创建（避免覆盖已有文件）
+    if [ ! -e "$link" ]; then
+        cp -f "$so" "$link"
+        soname_created=$((soname_created + 1))
+    fi
+done < <(find "$SROOT" -name '*.so.*' -type f)
+log "SONAME 实体文件补全: $soname_created 条"
 
 # 2) 打 zip（python3 zipfile，免依赖系统 zip）
-cp "$SYMLINKS_TXT" "$SROOT/SYMLINKS.txt"
 python3 - "$SROOT" "$OUT" <<'PYEOF'
 import os, sys, zipfile
 root, out = sys.argv[1], sys.argv[2]
