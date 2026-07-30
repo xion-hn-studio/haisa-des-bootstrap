@@ -4,11 +4,12 @@
 #   - Debian tarball 已 autoreconf，不需要 ./autogen
 #   - 1.22.20 在 Debian pool 已移除，升级到 1.22.22
 #
-# 关键补丁（用 sed 在 pkg_prepare_src 实现，不依赖 patch context）：
-#   - data/ostable: 添加 linux-android -> linux 映射
-#     让 dpkg 识别 aarch64-linux-android host 三元组的 OS 部分
-#   - data/tupletable: 添加 aarch64-linux-android -> arm64 映射
-#     让 dpkg 把 aarch64-linux-android 映射到 Debian arm64 架构
+# 关键补丁:
+#   - patches/0001-skip-root-check.patch: 跳过 uid==0 检查
+#     Android app 进程是非 root uid，dpkg 默认检查会导致
+#     "requested operation requires superuser privilege"
+#   - data/ostable: 添加 linux-android -> linux 映射（sed 内联）
+#   - data/tupletable: 添加 aarch64-linux-android -> arm64 映射（sed 内联）
 #
 # 允许 Perl：不传 ac_cv_path_PERL=no，configure 自动探测
 #   （Termux/CI 环境 pkg install perl 后可用；无 Perl 时跳过 manpage 生成）
@@ -23,6 +24,18 @@ PKG_SRC_DIR="dpkg-1.22.22"
 pkg_prepare_src() {
     extract_pkg "$PKG_NAME" "$PKG_SRC_URL" "$PKG_SRC_DIR"
     local src="$SRC_DIR/$PKG_SRC_DIR"
+
+    # 应用 Android 适配 patch
+    # --forward: 跳过已应用的 patch（幂等）
+    # --no-backup-if-mismatch: 不留 .orig 文件
+    local patch_dir="$BS_ROOT/packages/dpkg/patches"
+    local p
+    for p in "$patch_dir"/*.patch; do
+        [ -f "$p" ] || continue
+        log "dpkg: 应用 patch $(basename "$p")"
+        patch -d "$src" -p1 --forward --no-backup-if-mismatch < "$p" || \
+            warn "dpkg: patch $(basename "$p") 应用失败或已应用（忽略）"
+    done
 
     # ostable: 添加 linux-android 条目
     # 格式: <Debian名>\t<GNU名>\t<正则>

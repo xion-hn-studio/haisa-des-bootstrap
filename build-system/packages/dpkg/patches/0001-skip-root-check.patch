@@ -1,0 +1,30 @@
+Description: Enable non-root mode by default for Android (uid is u0_aXXX, never 0).
+Origin: haisa-des
+Forwarded: not-needed
+Last-Update: 2026-07-30
+
+Android app processes run as non-root uid (u0_aXXX). dpkg has a FORCE_NON_ROOT
+flag (enabled via --force-not-root) that:
+  1. Makes modstatdb_open() use msdbrw_write instead of msdbrw_needsuperuser
+  2. Makes forcible_nonroot_error() ignore EPERM from chown/fchmod
+  3. Makes can_invoke_hooks() return true without uid==0
+
+But apt calls dpkg internally without --force-not-root, so the flag is never
+set. The cleanest fix is to flip FORCE_NON_ROOT to FORCETYPE_ENABLED by default
+(on Android there is no real root, so this is always the desired mode).
+
+This single patch covers:
+  - "requested operation requires superuser privilege" (dbmodify.c)
+  - "error setting ownership/permissions" (archives.c chown/fchmod EPERM)
+
+--- a/src/common/force.c
++++ b/src/common/force.c
+@@ -94,7 +94,7 @@
+ 	}, {
+ 		"not-root",
+ 		FORCE_NON_ROOT,
+-		FORCETYPE_DISABLED,
++		FORCETYPE_ENABLED,
+ 		N_("Try to (de)install things even when not root"),
+ 	}, {
+ 		"bad-path",
