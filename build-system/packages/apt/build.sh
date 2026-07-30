@@ -114,6 +114,7 @@ pkg_build() {
         -DCMAKE_INSTALL_FULL_LOCALSTATEDIR="$PREFIX" \
         -DCMAKE_INSTALL_LIBEXECDIR=lib \
         -DCMAKE_LIBRARY_PATH="$lib_paths" \
+        -DCMAKE_PREFIX_PATH="$STAGE_DIR$PREFIX" \
         -DCACHE_DIR="$PREFIX/var/cache/apt" \
         -DCOMMON_ARCH="$TARGET_ABI" \
         -DDPKG_DATADIR="$PREFIX/share/dpkg" \
@@ -121,7 +122,15 @@ pkg_build() {
         -DWITH_DOC=OFF \
         -DWITH_DOC_MANPAGES=ON \
         -DPERL_EXECUTABLE="$(command -v perl || echo /bin/false)" \
-        -DCMAKE_HAVE_LIBC_PTHREAD=ON
+        -DCMAKE_HAVE_LIBC_PTHREAD=ON \
+        -DBZIP2_INCLUDE_DIR="$STAGE_DIR$PREFIX/include" \
+        -DBZIP2_LIBRARY_RELEASE="$STAGE_DIR$PREFIX/lib/libbz2.so"
+    # ^ bzip2 无 pkg-config 文件（裸 Makefile 安装），CMake 的 FindBZip2 模块
+    #   只搜系统标准路径（/usr/include、/usr/lib）和 PATH。GitHub Actions runner
+    #   ubuntu-latest 默认未装 libbz2-dev → BZIP2_INCLUDE_DIR-NOTFOUND。
+    #   显式给 cache 变量指向 staging 路径。
+    # CMAKE_PREFIX_PATH: 让 find_package 在 staging 下找 .pc 和 cmake config
+    #   （兜底 FindLZ4/FindZstd 等通过 .pc 找但 PKG_CONFIG_SYSROOT_DIR 不够的场景）
     # ^ bionic 把 pthread 合并进 libc（API 21+），无独立 libpthread.so
     #   FindThreads 的 _threads_check_libc() 会用 CHECK_C_SOURCE_COMPILES
     #   尝试编译链接 pthread 测试程序。交叉编译时 try_compile 无法运行
