@@ -16,6 +16,12 @@ pkg_build() {
     # 直接导出 CFLAGS/LIBS 绕过 gpg-error-config 调用（AM_PATH_GPG_ERROR 优先用环境变量）。
     export GPG_ERROR_CFLAGS="-I$STAGE_DIR$PREFIX/include"
     export GPG_ERROR_LIBS="-L$STAGE_DIR$PREFIX/lib -lgpg-error"
+    # 兜底：GPG_ERROR_CFLAGS 仅用于 configure 探测，不进 Makefile 的编译 CFLAGS
+    # （libgcrypt 的 Makefile.am 未把 GPG_ERROR_CFLAGS 合入 AM_CFLAGS）。
+    # gcrypt.h #include <gpg-error.h> 需 -I 指向 staging，否则编译报 file not found。
+    # 详见 docs/compile-pitfalls.md 坑 13（交叉编译三件套）。
+    export CFLAGS="$CFLAGS -I$STAGE_DIR$PREFIX/include"
+    export LDFLAGS="$LDFLAGS -L$STAGE_DIR$PREFIX/lib"
 
     # --with-libgpg-error-prefix 指向刚编译的 libgpg-error staging
     # --disable-asm：Android bionic 汇编兼容性问题

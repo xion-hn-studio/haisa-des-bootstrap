@@ -42,6 +42,40 @@ pkg_prepare_src() {
         sed -i 's/NO_DEFAULT_PATH//' "$fb"
         log "apt: FindBerkeley.cmake 移除 NO_DEFAULT_PATH"
     fi
+
+    # Berkeley DB 仅用于 apt-ftparchive（构建仓库索引工具），设备端不需要。
+    # 交叉编译无 aarch64 libdb，把 REQUIRED 去掉让 find_package 失败时不报错，
+    # BERKELEY_FOUND=FALSE → HAVE_BDB 不定义 → apt-ftparchive 不构建。
+    local cml="$src/CMakeLists.txt"
+    if [ -f "$cml" ] && grep -q 'find_package(Berkeley REQUIRED)' "$cml"; then
+        sed -i 's/find_package(Berkeley REQUIRED)/find_package(Berkeley)/' "$cml"
+        log "apt: Berkeley DB 改为可选"
+    fi
+    # add_subdirectory(ftparchive) 无条件构建 apt-ftparchive，会链接 ${BERKELEY_LIBRARIES}
+    # （NOTFOUND → CMake generate 失败）。包裹在 if(HAVE_BDB) 内，无 Berkeley DB 时跳过。
+    if [ -f "$cml" ] && grep -q '^add_subdirectory(ftparchive)$' "$cml" && \
+       ! grep -q 'if.HAVE_BDB' "$cml"; then
+        sed -i 's/^add_subdirectory(ftparchive)$/if(HAVE_BDB)\n  add_subdirectory(ftparchive)\nendif()/' "$cml"
+        log "apt: ftparchive 构建包裹在 if(HAVE_BDB) 内"
+    fi
+
+    # apt-pkg/CMakeLists.txt 把 XXHASH/GCRYPT include dir 设为 PRIVATE：
+    #   target_include_directories(apt-pkg PRIVATE ... ${XXHASH_INCLUDE_DIRS} ...)
+    # 但 apt-pkg 的公开头文件 pkgcachegen.h 直接 #include <xxhash.h>，
+    # 下游 apt-private（target_link_libraries PUBLIC apt-pkg）只继承 PUBLIC/INTERFACE
+    # include dir，看不到 PRIVATE 的 xxhash 路径 → fatal error: 'xxhash.h' file not found。
+    # 解决：在 target_include_directories 后追加一行 PUBLIC，让下游也能找到这些公开头。
+    local pkg_cml="$src/apt-pkg/CMakeLists.txt"
+    if [ -f "$pkg_cml" ] && \
+       grep -q 'target_include_directories(apt-pkg' "$pkg_cml" && \
+       ! grep -q 'haisa-des patch: XXHASH' "$pkg_cml"; then
+        # 在 add_library(apt-pkg ...) 之前插入 PUBLIC include_directories
+        # （target 创建后才能用 target_include_directories，但用 include_directories
+        #   作用域是当前目录及子目录，apt-private 是兄弟目录不会继承，所以必须用 target）
+        # 把它放到 add_library 之后即可。
+        sed -i '/^add_library(apt-pkg SHARED/a # haisa-des patch: XXHASH/GCRYPT 是 apt-pkg 公开头（pkgcachegen.h #include <xxhash.h>）的依赖，\n# PRIVATE 不会传递给下游 apt-private/cmdline，追加 PUBLIC 让消费者也能找到这些头。\ntarget_include_directories(apt-pkg PUBLIC $<$<BOOL:${XXHASH_FOUND}>:${XXHASH_INCLUDE_DIRS}> $<$<BOOL:${GCRYPT_FOUND}>:${GCRYPT_INCLUDE_DIRS}>)' "$pkg_cml"
+        log "apt: apt-pkg/CMakeLists.txt 追加 PUBLIC include (XXHASH/GCRYPT)"
+    fi
 }
 
 pkg_build() {
@@ -50,6 +84,13 @@ pkg_build() {
     # 找 triehash 脚本生成完美哈希。CI 主机未预装，vendor 在 lib/triehash。
     # 加到 PATH 让 CMake 能找到。
     export PATH="$BS_ROOT/lib:$PATH"
+
+    # PKG_CONFIG_SYSROOT_DIR: 让 pkg-config 把 .pc 里的设备路径 -I/-L 自动前缀 $STAGE_DIR
+    # .pc 文件的 prefix= 是设备路径（$PREFIX），交叉编译时 CI 主机找不到。
+    # 设 sysroot 后 -I$PREFIX/include → -I$STAGE_DIR$PREFIX/include（staging 实际路径）。
+    # 解决 FindLZ4/FindZstd 等 find_package 找到 .pc 但 include dir 无效的问题。
+    # 详见 docs/compile-pitfalls.md 坑 9（pkg-config 返回设备路径）。
+    export PKG_CONFIG_SYSROOT_DIR="$STAGE_DIR"
 
     mkdir -p build && cd build
 
@@ -80,11 +121,23 @@ pkg_build() {
         -DWITH_DOC=OFF \
         -DWITH_DOC_MANPAGES=ON \
         -DPERL_EXECUTABLE="$(command -v perl || echo /bin/false)" \
-        -DCMAKE_HAVE_PTHREAD_CREATE=ON
+        -DCMAKE_HAVE_LIBC_PTHREAD=ON
     # ^ bionic 把 pthread 合并进 libc（API 21+），无独立 libpthread.so
-    #   FindThreads 探测 libpthread 会 "not found"（正常），但交叉编译时
-    #   某些 CMake 版本不回退到 "no library" 分支导致 THREADS_NOT_FOUND
-    #   预置 cache 变量跳过库探测（详见 docs/compile-pitfalls.md 坑 18）
+    #   FindThreads 的 _threads_check_libc() 会用 CHECK_C_SOURCE_COMPILES
+    #   尝试编译链接 pthread 测试程序。交叉编译时 try_compile 无法运行
+    #   生成的 Android 可执行文件，导致 CMAKE_HAVE_LIBC_PTHREAD=FALSE，
+    #   后续 _threads_check_lib(pthread) 探测又因 libpthread.so 不存在而失败，
+    #   最终 THREADS_NOT_FOUND 或被 -pthread flag 误中。
+    #
+    #   预置 CMAKE_HAVE_LIBC_PTHREAD=ON 让 _threads_check_libc() 跳过 try_compile，
+    #   直接 set(CMAKE_THREAD_LIBS_INIT "")（空）+ Threads_FOUND=TRUE，
+    #   后续 _threads_check_lib 都因 Threads_FOUND 跳过。
+    #
+    #   !! 不要用 CMAKE_HAVE_PTHREAD_CREATE=ON !!
+    #   那是 _threads_check_lib(pthread) 的 cache 变量，
+    #   设为 ON 会让 CMake 误以为 libpthread 库存在 → 添加 -lpthread 链接标志
+    #   → ld.lld: error: unable to find library -lpthread
+    #   详见 docs/compile-pitfalls.md 坑 18
     make -j"$JOBS"
     make install DESTDIR="$PKG_STAGE"
 

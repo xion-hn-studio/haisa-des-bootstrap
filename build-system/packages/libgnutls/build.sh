@@ -46,7 +46,8 @@ pkg_build() {
         --disable-cxx \
         --disable-maintainer-mode \
         --disable-libdane \
-        --disable-hardware-acceleration
+        --disable-hardware-acceleration \
+        --without-brotli
     make -j"$JOBS"
     stage_install
 }

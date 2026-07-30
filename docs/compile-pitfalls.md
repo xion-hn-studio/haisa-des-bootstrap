@@ -938,29 +938,69 @@ CMake 的 `FindThreads` 模块按顺序探测 pthread 的可用性：
 
 ### 解决
 
-在 apt 的 cmake 命令里预置 cache 变量，告诉 FindThreads 跳过库探测（[build.sh](file:///workspace/haisa-des-bootstrap/build-system/packages/apt/build.sh) 的 cmake 参数）：
+在 apt 的 cmake 命令里预置 cache 变量 `CMAKE_HAVE_LIBC_PTHREAD=ON`（[build.sh](file:///workspace/haisa-des-bootstrap/build-system/packages/apt/build.sh) 的 cmake 参数）：
 
 ```bash
 cmake .. \
     ...
     # Android bionic 把 pthread 合并进 libc（API 21+），没有独立 libpthread.so
-    # FindThreads 探测 libpthread/libpthreads 会 "not found"（正常），
-    # 但某些 CMake 版本交叉编译时不回退到 "no library" 分支导致 THREADS_NOT_FOUND
-    # 预置 cache 变量跳过库探测，直接声明 pthread_create 可用
-    -DCMAKE_HAVE_PTHREAD_CREATE=ON \
+    # FindThreads 的 _threads_check_libc() 用 try_compile 测试 pthread 是否在 libc，
+    # 交叉编译时 try_compile 无法运行 Android 可执行文件 → 测试失败
+    # 预置 CMAKE_HAVE_LIBC_PTHREAD=ON 让 _threads_check_libc() 跳过 try_compile，
+    # 直接 set(CMAKE_THREAD_LIBS_INIT "")（空）+ Threads_FOUND=TRUE，
+    # 后续 _threads_check_lib 都因 Threads_FOUND 跳过。
+    -DCMAKE_HAVE_LIBC_PTHREAD=ON \
     ...
 ```
 
-**`CMAKE_HAVE_PTHREAD_CREATE=ON`** 的作用：FindThreads 看到这个 cache 变量后跳过 `check_library_exists(pthread pthread_create)` 探测，直接认为 pthread 可用且不需要额外的线程库（`CMAKE_THREAD_LIBS_INIT=""`）。这对 bionic 完全正确——pthread 函数确实在 libc 里，不需要 `-lpthread`。
+### !! 不要用 CMAKE_HAVE_PTHREAD_CREATE=ON !!
+
+`CMAKE_HAVE_PTHREAD_CREATE` 是 `_threads_check_lib(pthread pthread_create ...)` 的 cache 变量。
+把它设为 `ON` 会让 CMake **误以为 `libpthread` 库存在**：
+
+```cmake
+macro(_threads_check_lib LIBNAME FUNCNAME VARNAME)
+  if(NOT Threads_FOUND)
+     CHECK_LIBRARY_EXISTS(${LIBNAME} ${FUNCNAME} "" ${VARNAME})
+     # ↑ 若 ${VARNAME} 已在 cache 里为 ON，CHECK_LIBRARY_EXISTS 直接复用缓存，
+     #   不再重新探测 → 返回 TRUE
+     if(${VARNAME})
+       set(CMAKE_THREAD_LIBS_INIT "-l${LIBNAME}")
+       # ↑ 设为 "-lpthread" → 后续所有可执行文件链接命令带 -lpthread
+       #   → ld.lld: error: unable to find library -lpthread
+       set(Threads_FOUND TRUE)
+     endif()
+  endif ()
+endmacro()
+```
+
+**症状**：configure 阶段 `Found Threads: TRUE`（看似成功），但 `make` 时链接报：
+
+```
+ld.lld: error: unable to find library -lpthread
+clang++: error: linker command failed with exit code 1
+```
+
+可在 `build/<target>/<target>.dir/link.txt` 里看到 `-lpthread` 被硬编码进了链接命令。
+
+**正确的 cache 变量是 `CMAKE_HAVE_LIBC_PTHREAD`**：它对应 `_threads_check_libc()` 宏，探测成功后设置 `CMAKE_THREAD_LIBS_INIT=""`（空），不会引入任何 `-lpthread` 链接标志。
 
 ### 验证
 
-设置后 CMake configure 应输出：
+设置 `CMAKE_HAVE_LIBC_PTHREAD=ON` 后，CMake configure 应输出：
 ```
 -- Looking for pthread_create in pthreads - not found   ← 正常，bionic 无 libpthreads
 -- Looking for pthread_create in pthread - not found     ← 正常，bionic 无独立 libpthread
--- Found Threads: TRUE                                   ← FindThreads 成功（用了 cache 变量）
+-- Found Threads: TRUE                                   ← FindThreads 成功
 ```
+
+并在 `CMakeCache.txt` 里看到：
+```
+CMAKE_HAVE_LIBC_PTHREAD:UNINITIALIZED=ON
+CMAKE_THREAD_LIBS_INIT:INTERNAL=         # ← 空值，无 -lpthread
+```
+
+任何 `<target>.dir/link.txt` 都**不应**包含 `-lpthread`。
 
 ### 通用规律
 
@@ -968,7 +1008,7 @@ cmake .. \
 
 1. `Looking for pthread_create in pthreads/pthread - not found` 是**正常的探测输出**，不要被吓到
 2. 只有当 FindThreads 最终报 `THREADS_NOT_FOUND` / `Threads not found` 才是真正的失败
-3. 修复方式：`-DCMAKE_HAVE_PTHREAD_CREATE=ON` 跳过库探测
+3. 修复方式：`-DCMAKE_HAVE_LIBC_PTHREAD=ON` 跳过 try_compile，让 FindThreads 走 "pthread in libc" 分支
 
 **类似的 bionic 库合并问题**：
 - `librt` → 合并进 libc（`clock_gettime` 等直接在 libc）
@@ -976,6 +1016,88 @@ cmake .. \
 - `libm` → 合并进 libc（部分数学函数）
 
 遇到 CMake 的 `find_library` / `check_library_exists` 对这些库报 "not found" 时，用对应的 cache 变量绕过，或确认是否真的需要链接。
+
+---
+
+## 坑 19：apt-pkg PRIVATE include 导致下游 apt-private 找不到 xxhash.h
+
+**包**：apt 2.8.1
+**对应文件**：[packages/apt/build.sh](file:///workspace/haisa-des-bootstrap/build-system/packages/apt/build.sh)
+
+### 现象
+
+apt 构建到 80% 时（apt-pkg 已编译完，开始编 apt-private）报：
+
+```
+/workspace/.../apt-private/private-source.cc:32:
+/workspace/.../build/include/apt-pkg/deblistparser.h:15:
+/workspace/.../build/include/apt-pkg/pkgcachegen.h:33:10: fatal error: 'xxhash.h' file not found
+   33 | #include <xxhash.h>
+      |          ^~~~~~~~~~
+```
+
+但 xxhash 确实已构建到 staging（`libxxhash.so` + `xxhash.h` 都在），且 apt-pkg 编译时能找到 `xxhash.h`。
+
+### 根因
+
+apt-pkg 的 [CMakeLists.txt](file:///workspace/haisa-des-bootstrap/build-system/.work/prod/src/apt-2.8.1/apt-pkg/CMakeLists.txt) 把依赖库的 include dir 都设为 **PRIVATE**：
+
+```cmake
+target_include_directories(apt-pkg
+                           PRIVATE ${ZLIB_INCLUDE_DIRS}
+                                   ${BZIP2_INCLUDE_DIR}
+                                   ${LZMA_INCLUDE_DIRS}
+                                   ${LZ4_INCLUDE_DIRS}
+                                   ...
+                                   $<$<BOOL:${GCRYPT_FOUND}>:${GCRYPT_INCLUDE_DIRS}>
+                                   $<$<BOOL:${XXHASH_FOUND}>:${XXHASH_INCLUDE_DIRS}>
+)
+```
+
+CMake 的 `target_include_directories(... PRIVATE ...)` 只对**当前 target 自己**可见，**不会**通过 `target_link_libraries(... PUBLIC apt-pkg)` 传递给下游消费者。
+
+但 apt-pkg 的**公开头文件**（安装到 `$PREFIX/include/apt-pkg/`，会被 apt-private/cmdline `#include`）里**直接 `#include <xxhash.h>`**：
+
+```cpp
+// apt-pkg/pkgcachegen.h（公开头）
+#include <xxhash.h>   // ← 需要 XXHASH_INCLUDE_DIRS，但它是 PRIVATE
+```
+
+所以 apt-private 编译时看不到 xxhash.h 的路径，报 file not found。
+
+**为什么其他依赖（zlib/bzip2/lzma）没报错**：因为它们的头文件没有被 apt-pkg 的公开头直接 `#include`（apt-pkg 公开头只用 STL 和自己的类型，不暴露 zlib 的 `zlib.h`）。只有 `pkgcachegen.h` 暴露了 `xxhash.h` 和（间接）`gcrypt.h`。
+
+### 解决
+
+在 [build.sh](file:///workspace/haisa-des-bootstrap/build-system/packages/apt/build.sh) 的 `pkg_prepare_src` 里追加一行 PUBLIC include：
+
+```bash
+# 在 add_library(apt-pkg SHARED ...) 之后追加 PUBLIC include
+sed -i '/^add_library(apt-pkg SHARED/a \
+# haisa-des patch: XXHASH/GCRYPT 是 apt-pkg 公开头的依赖（pkgcachegen.h #include <xxhash.h>），\
+# PRIVATE 不会传递给下游 apt-private/cmdline，追加 PUBLIC 让消费者也能找到。\
+target_include_directories(apt-pkg PUBLIC \
+    $<$<BOOL:${XXHASH_FOUND}>:${XXHASH_INCLUDE_DIRS}> \
+    $<$<BOOL:${GCRYPT_FOUND}>:${GCRYPT_INCLUDE_DIRS}>)' "$pkg_cml"
+```
+
+注意：
+- 用 `target_include_directories`（target 级）而非 `include_directories`（目录级）。后者只对当前 CMakeLists.txt 及其子目录生效，apt-private 是兄弟目录，不会继承。
+- 与原有的 PRIVATE 共存（CMake 允许同一 target 多次 `target_include_directories`，PUBLIC 和 PRIVATE 各自累加）。
+- **不要**直接改原 PRIVATE 为 PUBLIC——那样会污染下游的 include 路径，可能引入其他头文件冲突。只把"被公开头直接 `#include` 的依赖"（XXHASH/GCRYPT）追加为 PUBLIC。
+
+### 通用规律
+
+CMake `target_include_directories` 的 PRIVATE/PUBLIC 区别：
+- **PRIVATE**：仅当前 target 编译时可见，**不**传递给链接它的下游 target
+- **PUBLIC**：当前 target 和所有链接它的下游 target 都可见
+- **INTERFACE**：仅下游 target 可见，自己不可见
+
+**当一个库的公开头文件（会被下游 `#include`）直接 `#include` 了某个依赖的头时，该依赖的 include dir 必须设为 PUBLIC**，否则下游编译时找不到。
+
+典型例子：
+- apt-pkg 的 `pkgcachegen.h`（公开头）`#include <xxhash.h>` → XXHASH 必须 PUBLIC
+- libgnutls 的 `gnutls/gnutls.h`（公开头）`#include <nettle/...>` → nettle 必须 PUBLIC（libgnutls 已正确处理）
 
 ---
 
@@ -995,6 +1117,8 @@ cmake .. \
    - `下载失败` + 502/504 → 网络问题（见坑 12）
    - `Could not find triehash` → 缺少构建工具（见坑 17）
    - `Looking for pthread_create.*not found` → bionic pthread 合并（见坑 18，注意单行 not found 是正常探测）
+   - `unable to find library -lpthread` → 用错了 cache 变量，应改用 `CMAKE_HAVE_LIBC_PTHREAD=ON`（见坑 18）
+   - `'xxhash.h' file not found`（在 apt-private/cmdline 编译阶段）→ apt-pkg PRIVATE include 未传递，需追加 PUBLIC（见坑 19）
    - `cannot determine host dpkg architecture` → ostable/tupletable 格式（见坑 8.6）
    - `未知包:` → 新增包忘记加 pkg_deps 分支（见坑 8.5）
 

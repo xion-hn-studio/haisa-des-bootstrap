@@ -73,7 +73,7 @@ pkg_deps() {
         gmp)             echo "" ;;
         nettle)          echo "gmp" ;;
         libtasn1)        echo "" ;;
-        p11-kit)         echo "libtasn1" ;;
+        p11-kit)         echo "libffi libtasn1" ;;
         libunistring)    echo "" ;;
         libidn2)         echo "libunistring" ;;
         libgnutls)       echo "gmp nettle libtasn1 p11-kit libunistring libidn2" ;;
@@ -82,7 +82,8 @@ pkg_deps() {
         # dpkg：静态库；依赖 libmd（BSD 风格 MD5Init/MD5Update/MD5Final）
         dpkg)            echo "libmd" ;;
         # apt：真 Debian apt 2.8.1，依赖 dpkg + TLS/压缩库
-        apt)             echo "dpkg liblz4 zstd xxhash libiconv libgcrypt libgnutls" ;;
+        # zlib/bzip2/xz 是 apt (de)compressor 的 REQUIRED 依赖（find_package ZLIB/BZip2/LZMA）
+        apt)             echo "dpkg liblz4 zstd xxhash libiconv libgcrypt libgnutls zlib bzip2 xz" ;;
         *) die "未知包: $1" ;;
     esac
 }
