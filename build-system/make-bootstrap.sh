@@ -86,6 +86,49 @@ find "$SROOT/lib" -type f -exec chmod 0755 {} +
 [ -d "$SROOT/libexec" ] && find "$SROOT/libexec" -type f -exec chmod 0755 {} +
 log "权限修正: bin/ + lib/ 下所有文件 → 0755"
 
+# 1.7) 生成 dpkg status 数据库
+#   bootstrap.zip 预装了所有包的文件（staging 已 install），但 dpkg status 是空模板
+#   （dpkg/build.sh 只 touch 了 0 字节 status）。
+#   后果: 设备端 dpkg 认为所有预装包"未安装"，apt list 显示空，apt install ./x.deb
+#   时依赖检查失败（dpkg 认为依赖的包没装）。
+#
+#   修复: 遍历 dist/packages/*.deb，提取 control 字段写入 status（标记 installed），
+#   并生成 info/<pkg>.list（文件清单，供 dpkg -L / apt remove 使用）。
+#   这样设备端 dpkg -l 能列出已装包，apt install ./xxx.deb 依赖检查能通过。
+DPKG_ADMINDIR="$SROOT/var/lib/dpkg"
+mkdir -p "$DPKG_ADMINDIR/info" "$DPKG_ADMINDIR/updates" \
+         "$DPKG_ADMINDIR/triggers" "$DPKG_ADMINDIR/parts"
+: > "$DPKG_ADMINDIR/status"
+: > "$DPKG_ADMINDIR/available"
+status_count=0
+list_count=0
+for deb in "$DIST_DIR/packages/"*.deb; do
+    [ -f "$deb" ] || continue
+    # 提取包名
+    name=$(dpkg-deb -f "$deb" Package 2>/dev/null) || continue
+    [ -n "$name" ] || continue
+
+    # 写 status 段落: control 字段 + Status: install ok installed + 空行分隔
+    dpkg-deb -f "$deb" >> "$DPKG_ADMINDIR/status"
+    echo "Status: install ok installed" >> "$DPKG_ADMINDIR/status"
+    echo "" >> "$DPKG_ADMINDIR/status"
+    status_count=$((status_count + 1))
+
+    # 写 info/<pkg>.list: .deb 内文件清单（绝对路径格式，dpkg 标准）
+    # dpkg-deb -c 第 6 列是路径（./data/data/...），去掉前导 . 得 /data/data/...
+    dpkg-deb -c "$deb" 2>/dev/null | awk '{print $6}' | sed 's/^\.//' > "$DPKG_ADMINDIR/info/$name.list"
+    list_count=$((list_count + 1))
+done
+log "dpkg status 数据库: $status_count 个包, $list_count 个 .list 文件"
+
+# 1.8) chmod var/ 和 etc/（dpkg 写 var/lib/dpkg/、apt 读 etc/apt/ 需要权限）
+#   App 端 chmodDir 也会处理，但 make-bootstrap 层面先确保正确。
+[ -d "$SROOT/var" ] && find "$SROOT/var" -type d -exec chmod 0755 {} + 2>/dev/null || true
+[ -d "$SROOT/var" ] && find "$SROOT/var" -type f -exec chmod 0644 {} + 2>/dev/null || true
+[ -d "$SROOT/etc" ] && find "$SROOT/etc" -type d -exec chmod 0755 {} + 2>/dev/null || true
+[ -d "$SROOT/etc" ] && find "$SROOT/etc" -type f -exec chmod 0644 {} + 2>/dev/null || true
+log "权限修正: var/ + etc/ 目录 0755, 文件 0644"
+
 # 2) 打 zip（python3 zipfile，免依赖系统 zip）
 python3 - "$SROOT" "$OUT" <<'PYEOF'
 import os, sys, zipfile
