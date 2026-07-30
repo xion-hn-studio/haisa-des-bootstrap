@@ -165,12 +165,16 @@ pkg_build() {
              "$etc_apt/auth.conf.d" \
              "$etc_apt/trusted.gpg.d"
 
-    # sources.list: 仓库源（不再用 [trusted=yes]，由 trusted.gpg.d/haisa-des.gpg 验签）
+    # sources.list: 仓库源
+    # [trusted=yes]: 临时降级跳过签名校验（haisa-des-repo 的 organize workflow
+    #   尚未在 repository_dispatch 触发时签名 Release，InRelease/Release.gpg 404）
+    #   待 haisa-des-repo 配置 HAISADES_GPG_PRIVATE_KEY Secret 并修复 organize.yml 后
+    #   可去掉 [trusted=yes]，改由 trusted.gpg.d/haisa-des.gpg 验签
     cat > "$etc_apt/sources.list" <<EOF
 # haisa-des package repository
-# 公钥在 $PREFIX/etc/apt/trusted.gpg.d/haisa-des.gpg（随 apt 包安装）
-# Release/InRelease 由 make-keyring.sh sign 用 GPG RSA 2048 私钥签名
-deb ${apt_repo_url} stable main
+# 临时用 [trusted=yes] 跳过签名验证（organize workflow 签名步骤未自动触发）
+# 公钥在 $PREFIX/etc/apt/trusted.gpg.d/haisa-des.gpg（已随 apt 包安装）
+deb [trusted=yes] ${apt_repo_url} stable main
 EOF
 
     # 公钥拷到 trusted.gpg.d/（apt 2.8.1 默认从这里加载信任公钥）
