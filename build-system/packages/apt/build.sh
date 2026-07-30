@@ -120,7 +120,10 @@ pkg_build() {
         -DDPKG_DATADIR="$PREFIX/share/dpkg" \
         -DUSE_NLS=OFF \
         -DWITH_DOC=OFF \
-        -DWITH_DOC_MANPAGES=ON \
+        -DWITH_DOC_MANPAGES=OFF \
+        -DWITH_DOC_GUIDES=OFF \
+        -DWITH_DOC_DOXYGEN=OFF \
+        -DWITH_DOC_EXAMPLES=OFF \
         -DPERL_EXECUTABLE="$(command -v perl || echo /bin/false)" \
         -DCMAKE_HAVE_LIBC_PTHREAD=ON \
         -DBZIP2_INCLUDE_DIR="$STAGE_DIR$PREFIX/include" \
