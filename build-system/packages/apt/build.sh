@@ -175,18 +175,28 @@ EOF
 
     # 公钥拷到 trusted.gpg.d/（apt 2.8.1 默认从这里加载信任公钥）
     # 来源优先级:
-    #   1. $BS_ROOT/.gpg/haisa-des.gpg（make-keyring.sh init 后用 export-pubkey 生成二进制格式）
-    #   2. $BS_ROOT/.gpg/haisa-des.pub.asc（ASCII 格式，gpg --dearmor 转二进制）
-    #   3. 都没有则跳过并告警（构建可继续，但设备端需手动 apt-key add 或用 trusted=yes 临时降级）
+    #   1. $BS_ROOT/keys/haisa-des.gpg（公钥二进制，提交进仓库供 CI 使用）
+    #   2. $BS_ROOT/.gpg/haisa-des.gpg（本地 make-keyring.sh init 后用 export-pubkey 生成）
+    #   3. $BS_ROOT/keys/haisa-des.pub.asc（ASCII 公钥，gpg --dearmor 转二进制）
+    #   4. $BS_ROOT/.gpg/haisa-des.pub.asc（本地 ASCII 公钥）
+    #   5. 都没有则跳过并告警（构建可继续，但设备端需手动 apt-key add 或用 trusted=yes 临时降级）
+    #
+    # 注意：.gpg/ 被 .gitignore 排除（含私钥，绝不提交），CI 用 keys/ 里的公钥
     local gpg_pubkey_bin="$etc_apt/trusted.gpg.d/haisa-des.gpg"
-    if [ -f "$BS_ROOT/.gpg/haisa-des.gpg" ]; then
+    if [ -f "$BS_ROOT/keys/haisa-des.gpg" ]; then
+        cp "$BS_ROOT/keys/haisa-des.gpg" "$gpg_pubkey_bin"
+        log "apt: 公钥来源 = keys/haisa-des.gpg（二进制）"
+    elif [ -f "$BS_ROOT/.gpg/haisa-des.gpg" ]; then
         cp "$BS_ROOT/.gpg/haisa-des.gpg" "$gpg_pubkey_bin"
         log "apt: 公钥来源 = .gpg/haisa-des.gpg（二进制）"
+    elif [ -f "$BS_ROOT/keys/haisa-des.pub.asc" ]; then
+        gpg --dearmor < "$BS_ROOT/keys/haisa-des.pub.asc" > "$gpg_pubkey_bin"
+        log "apt: 公钥来源 = keys/haisa-des.pub.asc（ASCII→二进制）"
     elif [ -f "$BS_ROOT/.gpg/haisa-des.pub.asc" ]; then
         gpg --dearmor < "$BS_ROOT/.gpg/haisa-des.pub.asc" > "$gpg_pubkey_bin"
         log "apt: 公钥来源 = .gpg/haisa-des.pub.asc（ASCII→二进制）"
     else
-        warn "apt: 无 GPG 公钥（$BS_ROOT/.gpg/haisa-des.{gpg,pub.asc} 都不存在）"
+        warn "apt: 无 GPG 公钥（keys/ 和 .gpg/ 都不存在 haisa-des.{gpg,pub.asc}）"
         warn "    设备端 apt update 会因签名验证失败而失败。请先运行 make-keyring.sh init 生成密钥对。"
         warn "    临时降级：在 sources.list 加 [trusted=yes]（不推荐用于生产）"
     fi
