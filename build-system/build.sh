@@ -22,7 +22,8 @@ source "$BS_ROOT/lib/common.sh"
 # M3.3 扩展：pip wrapper 已合并到 python 包内（python 包 build 时一并安装 wrapper + pip.real）
 # M4 扩展：真 apt 2.8.1 + dpkg + 14 个依赖库（liblz4/zstd/xxhash/libiconv/
 #          libgpg-error/libgcrypt/gmp/nettle/libtasn1/p11-kit/libunistring/libidn2/libgnutls/libmd）
-ALL_PACKAGES="zlib ncurses bash openssl ca-certificates curl toybox \
+ALL_PACKAGES="libcxx-shared \
+              zlib ncurses bash openssl ca-certificates curl toybox \
               libffi sqlite bzip2 xz expat readline \
               liblz4 zstd xxhash libiconv \
               libgpg-error libgcrypt \
@@ -37,6 +38,9 @@ BUILTIN_PACKAGES=""
 
 pkg_deps() {
     case "$1" in
+        # libcxx-shared：NDK r29 的 libc++_shared.so（C++ STL 运行时）
+        # 所有 NDK clang++ 编译的 .so（libapt-pkg/libapt-private）都依赖它
+        libcxx-shared)   echo "" ;;
         zlib)            echo "" ;;
         ncurses)         echo "" ;;
         bash)            echo "ncurses" ;;
@@ -81,9 +85,10 @@ pkg_deps() {
         libmd)           echo "" ;;
         # dpkg：静态库；依赖 libmd（BSD 风格 MD5Init/MD5Update/MD5Final）
         dpkg)            echo "libmd" ;;
-        # apt：真 Debian apt 2.8.1，依赖 dpkg + TLS/压缩库
+        # apt：真 Debian apt 2.8.1，依赖 dpkg + TLS/压缩库 + libc++_shared（C++ STL）
         # zlib/bzip2/xz 是 apt (de)compressor 的 REQUIRED 依赖（find_package ZLIB/BZip2/LZMA）
-        apt)             echo "dpkg liblz4 zstd xxhash libiconv libgcrypt libgnutls zlib bzip2 xz" ;;
+        # libcxx-shared：apt 用 NDK clang++ 编译，链接 NDK libc++_shared.so（__ndk1 namespace）
+        apt)             echo "dpkg liblz4 zstd xxhash libiconv libgcrypt libgnutls zlib bzip2 xz libcxx-shared" ;;
         *) die "未知包: $1" ;;
     esac
 }
