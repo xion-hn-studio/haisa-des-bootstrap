@@ -6,8 +6,8 @@
 #
 # 产物 .deb 格式（ar 归档，Debian 标准）:
 #   debian-binary      # "2.0\n"
-#   control.tar.gz      # control / md5sums
-#   data.tar.gz         # 实际文件，相对 staging-prefix-dir 根（即相对 $PREFIX）
+#   control.tar.gz      # control / md5sums（体积小，用 gz）
+#   data.tar.xz         # 实际文件，相对 staging-prefix-dir 根（用 xz 压缩，体积比 gz 小 30-50%）
 #
 # 设计要点:
 #   - data.tar.gz 的根 = staging-prefix-dir（相对路径，不含 $PREFIX 完整路径）
@@ -60,21 +60,23 @@ if [ -f "$stage_dir/.conffiles" ]; then
         > "$work/control/conffiles"
 fi
 
-# ---- 3. data.tar.gz（相对 staging-prefix-dir 根）----
-# 用相对路径打包，确保 data.tar.gz 里是 bin/bash 而非完整路径
+# ---- 3. data.tar.xz（相对 staging-prefix-dir 根，xz 压缩）----
+# 用相对路径打包，确保 data.tar.xz 里是 bin/bash 而非完整路径
 # 排除空目录（dpkg 不需要）和 staging 根的 .conffiles 元数据文件
-( cd "$stage_dir" && find . -type f -o -type l | sed 's|^\./||' | grep -v '^\.conffiles$' | tar -czf "$work/data.tar.gz" -T - )
+# xz 比 gzip 压缩率高 30-50%，对大包（如 openjdk-17 213MB→~70MB）尤其显著，
+# 确保 .deb 体积 <100MB 以适配 GitHub gh-pages 单文件限制
+( cd "$stage_dir" && find . -type f -o -type l | sed 's|^\./||' | grep -v '^\.conffiles$' | tar -cJf "$work/data.tar.xz" -T - )
 
-# 打包 control（含可选 conffiles）
+# 打包 control（含可选 conffiles，体积小用 gz）
 conffiles_arg=""
 [ -f "$work/control/conffiles" ] && conffiles_arg="conffiles"
 ( cd "$work/control" && tar -czf "$work/control.tar.gz" control md5sums $conffiles_arg )
 
 # ---- 4. 组装 .deb（ar 归档）----
-# Debian .deb 的 ar 归档顺序固定: debian-binary, control.tar.gz, data.tar.gz
+# Debian .deb 的 ar 归档顺序固定: debian-binary, control.tar.gz, data.tar.xz
 ar rcs "$out_deb" \
     "$work/debian-binary" \
     "$work/control.tar.gz" \
-    "$work/data.tar.gz"
+    "$work/data.tar.xz"
 
 echo "mk-deb: $out_deb ($(du -h "$out_deb" | awk '{print $1}'))"

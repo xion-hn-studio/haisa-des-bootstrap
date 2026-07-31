@@ -31,3 +31,10 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 # ---- 通用编译参数 ----
 COMMON_CFLAGS="-O2 -fPIC -fstack-protector-strong"
 COMMON_LDFLAGS="-Wl,-rpath,$PREFIX/lib -Wl,--enable-new-dtags -Wl,-z,max-page-size=16384 -Wl,--gc-sections"
+
+# ---- 独立包（只打 .deb，不合并到总 staging / 不进 bootstrap.zip）----
+# 用于体积大的可选包（如 openjdk-17 ~200MB、gradle ~300MB），用户通过
+# apt install <pkg> 或 apt install ./<pkg>.deb 按需安装。
+# make-bootstrap.sh 据此跳过这些包的 dpkg status 注册（文件不在 bootstrap.zip 里，
+# 标记为已安装会导致 apt 误判 "already installed" 但文件不存在）。
+STANDALONE_PACKAGES="openjdk-17 gradle"

@@ -95,31 +95,88 @@ log "权限修正: bin/ + lib/ 下所有文件 → 0755"
 #   修复: 遍历 dist/packages/*.deb，提取 control 字段写入 status（标记 installed），
 #   并生成 info/<pkg>.list（文件清单，供 dpkg -L / apt remove 使用）。
 #   这样设备端 dpkg -l 能列出已装包，apt install ./xxx.deb 依赖检查能通过。
+#
+#   健壮性: dpkg-deb -f 对 Version 字段有严格校验（必须以数字开头），
+#   若版本号不合规（如 libcxx-shared 旧版 "r29.0..."）会报错跳过。
+#   这里用 ar + tar 手动解析 control 作为 fallback，确保所有 .deb 都进 status。
 DPKG_ADMINDIR="$SROOT/var/lib/dpkg"
 mkdir -p "$DPKG_ADMINDIR/info" "$DPKG_ADMINDIR/updates" \
          "$DPKG_ADMINDIR/triggers" "$DPKG_ADMINDIR/parts"
 : > "$DPKG_ADMINDIR/status"
 : > "$DPKG_ADMINDIR/available"
+
+# 从 .deb 手动提取 control 文件内容（不依赖 dpkg-deb，支持 gz/xz）
+# 用法: _extract_control <deb> → stdout 输出 control 文件内容
+_extract_control() {
+    local deb="$1" tmp ctrl_tar
+    tmp="$(mktemp -d)"
+    ( cd "$tmp" && ar x "$deb" ) 2>/dev/null || { rm -rf "$tmp"; return 1; }
+    ctrl_tar="$(ls "$tmp"/control.tar.* 2>/dev/null | head -1)"
+    [ -n "$ctrl_tar" ] || { rm -rf "$tmp"; return 1; }
+    tar -xf "$ctrl_tar" -C "$tmp" ./control 2>/dev/null
+    cat "$tmp/control" 2>/dev/null
+    rm -rf "$tmp"
+}
+
+# 从 .deb 手动提取文件清单（不依赖 dpkg-deb -c，支持 gz/xz）
+# 用法: _extract_filelist <deb> → stdout 输出绝对路径列表
+_extract_filelist() {
+    local deb="$1" tmp data_tar
+    tmp="$(mktemp -d)"
+    ( cd "$tmp" && ar x "$deb" ) 2>/dev/null || { rm -rf "$tmp"; return 1; }
+    data_tar="$(ls "$tmp"/data.tar.* 2>/dev/null | head -1)"
+    [ -n "$data_tar" ] || { rm -rf "$tmp"; return 1; }
+    tar -tf "$data_tar" 2>/dev/null | sed 's|^\./|/|'
+    rm -rf "$tmp"
+}
+
 status_count=0
 list_count=0
+skip_count=0
 for deb in "$DIST_DIR/packages/"*.deb; do
     [ -f "$deb" ] || continue
-    # 提取包名
-    name=$(dpkg-deb -f "$deb" Package 2>/dev/null) || continue
-    [ -n "$name" ] || continue
+    # 跳过 STANDALONE 包：它们的文件不在 bootstrap.zip 里（只打 .deb 供 apt install），
+    # 标记为已安装会导致 apt 误判 "already installed" 但文件不存在。
+    deb_basename="$(basename "$deb")"
+    is_standalone=false
+    for sp in $STANDALONE_PACKAGES; do
+        case "$deb_basename" in
+            "${sp}"_*) is_standalone=true; break ;;
+        esac
+    done
+    if $is_standalone; then
+        log "  跳过 STANDALONE 包 status 注册: $deb_basename"
+        continue
+    fi
+    # 优先用 dpkg-deb -f（快），失败则用 ar+tar 手动解析
+    ctrl_content=""
+    if dpkg-deb -f "$deb" Package >/dev/null 2>&1; then
+        ctrl_content="$(dpkg-deb -f "$deb")"
+    else
+        ctrl_content="$(_extract_control "$deb")"
+    fi
+    [ -n "$ctrl_content" ] || { skip_count=$((skip_count + 1)); continue; }
+
+    # 提取包名（从 control 内容）
+    name=$(echo "$ctrl_content" | awk '/^Package:/ {print $2; exit}')
+    [ -n "$name" ] || { skip_count=$((skip_count + 1)); continue; }
 
     # 写 status 段落: control 字段 + Status: install ok installed + 空行分隔
-    dpkg-deb -f "$deb" >> "$DPKG_ADMINDIR/status"
+    echo "$ctrl_content" >> "$DPKG_ADMINDIR/status"
     echo "Status: install ok installed" >> "$DPKG_ADMINDIR/status"
     echo "" >> "$DPKG_ADMINDIR/status"
     status_count=$((status_count + 1))
 
     # 写 info/<pkg>.list: .deb 内文件清单（绝对路径格式，dpkg 标准）
-    # dpkg-deb -c 第 6 列是路径（./data/data/...），去掉前导 . 得 /data/data/...
-    dpkg-deb -c "$deb" 2>/dev/null | awk '{print $6}' | sed 's/^\.//' > "$DPKG_ADMINDIR/info/$name.list"
+    # 优先 dpkg-deb -c，失败则手动 ar+tar
+    if dpkg-deb -c "$deb" >/dev/null 2>&1; then
+        dpkg-deb -c "$deb" 2>/dev/null | awk '{print $6}' | sed 's/^\.//' > "$DPKG_ADMINDIR/info/$name.list"
+    else
+        _extract_filelist "$deb" > "$DPKG_ADMINDIR/info/$name.list" 2>/dev/null
+    fi
     list_count=$((list_count + 1))
 done
-log "dpkg status 数据库: $status_count 个包, $list_count 个 .list 文件"
+log "dpkg status 数据库: $status_count 个包, $list_count 个 .list 文件, $skip_count 跳过"
 
 # 1.8) chmod var/ 和 etc/（dpkg 写 var/lib/dpkg/、apt 读 etc/apt/ 需要权限）
 #   App 端 chmodDir 也会处理，但 make-bootstrap 层面先确保正确。

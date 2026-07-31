@@ -12,7 +12,8 @@
 #
 # 无源码下载（PKG_SRC_URL 用 local:// 占位，pkg_prepare_src 跳过 extract）
 PKG_NAME="libcxx-shared"
-PKG_VERSION="r29.0.14206865"
+# Debian 版本号必须以数字开头（dpkg-deb -f 校验），去掉 NDK 版本的 'r' 前缀
+PKG_VERSION="29.0.14206865"
 PKG_SRC_URL="local://packages/libcxx-shared/.placeholder"
 PKG_SRC_SHA256=""
 PKG_SRC_DIR="libcxx-shared"

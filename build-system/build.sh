@@ -30,7 +30,7 @@ ALL_PACKAGES="libcxx-shared \
               gmp nettle libtasn1 p11-kit libunistring libidn2 libgnutls \
               libpng libjpeg-turbo freetype sdl2 sdl2_image sdl2_mixer sdl2_ttf \
               python libmd dpkg apt \
-              openjdk-17"
+              openjdk-17 gradle"
 
 # 内置包：打进 bootstrap.zip 的包（不打单独 .deb，也不进 Packages 索引）
 # M4 后 apt 改为真 apt 编译，打 .deb；bootstrap.zip 只含最小运行时（手动指定）
@@ -38,10 +38,10 @@ ALL_PACKAGES="libcxx-shared \
 BUILTIN_PACKAGES=""
 
 # 独立包：只打 .deb，不合并到总 staging（不进 bootstrap.zip）
-# 用于体积大的可选包（如 openjdk-17 约 220MB），用户通过 apt install <pkg> 按需安装。
-# 若合并进总 staging，bootstrap.zip 会膨胀到 300MB+，APK 过大。
-# 这些包的 .deb 仍会上传到 apt-repo，设备端 apt install 可正常拉取。
-STANDALONE_PACKAGES="openjdk-17"
+# 用于体积大的可选包（如 openjdk-17 ~200MB、gradle ~300MB），用户通过
+# apt install <pkg> 或 apt install ./<pkg>.deb 按需安装。
+# 定义在 config.sh（make-bootstrap.sh 也需读取，跳过 status 注册）
+# STANDALONE_PACKAGES 已在 config.sh 中定义，此处仅注释说明。
 
 pkg_deps() {
     case "$1" in
@@ -102,6 +102,8 @@ pkg_deps() {
         # 额外依赖（libandroid-shmem/alsa-lib/littlecms/fontconfig 等）随 openjdk-17 .deb 一起打包
         # 这里只声明 haisa-des 已有的包（构建顺序保证 staging 里已有这些 .so）
         openjdk-17)      echo "libiconv libjpeg-turbo zlib freetype libpng expat ca-certificates" ;;
+        # gradle: 纯 Java 工具，依赖 openjdk-17 运行（gradle 脚本通过 JAVA_HOME 找 java）
+        gradle)          echo "openjdk-17" ;;
         *) die "未知包: $1" ;;
     esac
 }
