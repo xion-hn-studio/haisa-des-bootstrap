@@ -33,8 +33,11 @@ COMMON_CFLAGS="-O2 -fPIC -fstack-protector-strong"
 COMMON_LDFLAGS="-Wl,-rpath,$PREFIX/lib -Wl,--enable-new-dtags -Wl,-z,max-page-size=16384 -Wl,--gc-sections"
 
 # ---- 独立包（只打 .deb，不合并到总 staging / 不进 bootstrap.zip）----
-# 用于体积大的可选包（如 openjdk-17 ~200MB、gradle ~300MB），用户通过
-# apt install <pkg> 或 apt install ./<pkg>.deb 按需安装。
+# 用于体积大的可选包，用户通过 apt install <pkg> 按需安装。
 # make-bootstrap.sh 据此跳过这些包的 dpkg status 注册（文件不在 bootstrap.zip 里，
 # 标记为已安装会导致 apt 误判 "already installed" 但文件不存在）。
-STANDALONE_PACKAGES="openjdk-17 gradle"
+#
+# v0.8.0: openjdk-17 + gradle 改为内置（合并到 bootstrap.zip），实现开箱即用，
+#         用户打开 App 即获得完整 JDK + Gradle + Python 编译环境，无需 apt install。
+#         代价：bootstrap.zip 体积从 ~150MB 增至 ~380MB，APK 体积相应增大。
+STANDALONE_PACKAGES=""
