@@ -44,13 +44,69 @@ pkg_build() {
     # build.sh 会在 cd "$SRC_DIR/$PKG_SRC_DIR" 后调用 pkg_build
     cp -a ./* "$gradle_dir/"
 
-    # bin/gradle 符号链接（gradle 脚本会解析 symlink 定位 APP_HOME/lib）
+    # 删除 Windows 批处理文件（Android 无用）
+    rm -f "$gradle_dir/bin/gradle.bat"
+
+    # ---- 替换官方 bin/gradle 为简化版 ----
+    # 官方启动脚本用 eval+xargs -n1 解析 DEFAULT_JVM_OPTS 的引号参数，
+    # 但 Android toybox 的 xargs 对引号处理与 GNU xargs 不同：
+    # toybox 保留引号字面字符 → java 收到 main class '"-Xmx64m"' → ClassNotFoundException。
+    # 这里用简化脚本直接调用 java，绕过 eval+xargs 兼容性问题。
+    local cli_jar
+    cli_jar=$(ls "$gradle_dir/lib/gradle-gradle-cli-main-"*.jar 2>/dev/null | head -1)
+    [ -n "$cli_jar" ] || { warn "gradle: 未找到 cli-main jar"; return 1; }
+    cli_jar=${cli_jar##*/}  # 只取文件名，运行时拼接路径
+
+    cat > "$gradle_dir/bin/gradle" <<GRADLEOF
+#!/bin/sh
+# haisa-des 简化版 gradle 启动脚本（绕过官方 eval+xargs 在 toybox 上的引号 bug）
+# 原理: 直接用 -jar 调用 gradle-cli-main，JVM 参数手动拼接（不依赖 xargs 解析引号）
+set -e
+
+# 解析 APP_HOME（支持 symlink，与官方脚本一致）
+app_path=\$0
+while [ -h "\$app_path" ]; do
+    ls=\$(ls -ld "\$app_path")
+    link=\${ls#*' -> '}
+    case "\$link" in
+        /*) app_path=\$link ;;
+        *)  app_path=\${app_path%/*}/\$link ;;
+    esac
+done
+APP_HOME=\${app_path%/*}/..
+APP_HOME=\$(cd "\$APP_HOME" && pwd)
+
+# JAVA_HOME: 优先环境变量，否则从 openjdk-17 profile.d 设置的路径找
+JAVA_HOME="\${JAVA_HOME:-}"
+if [ -z "\$JAVA_HOME" ]; then
+    # openjdk-17 安装在 \$PREFIX/lib/jvm/java-17-openjdk
+    JAVA_HOME="\${PREFIX:-/data/data/com.haisades/files/usr}/lib/jvm/java-17-openjdk"
+fi
+JAVACMD="\$JAVA_HOME/bin/java"
+[ -x "\$JAVACMD" ] || { echo "gradle: 找不到 java: \$JAVACMD" >&2; exit 1; }
+
+# Gradle 9.x 需要 instrumentation agent（构建性能监控，可选但官方默认启用）
+AGENT_JAR="\$APP_HOME/lib/agents/gradle-instrumentation-agent-9.6.1.jar"
+
+# JVM 参数（与官方 DEFAULT_JVM_OPTS 一致，但直接展开，避免引号解析问题）
+JVM_OPTS="-Xmx64m -Xms64m"
+[ -f "\$AGENT_JAR" ] && JVM_OPTS="\$JVM_OPTS -javaagent:\$AGENT_JAR"
+
+# 用户自定义参数（JAVA_OPTS / GRADLE_OPTS，按空格分词）
+JVM_OPTS="\$JVM_OPTS \${JAVA_OPTS:-} \${GRADLE_OPTS:-}"
+
+# 执行: java <jvm opts> -Dorg.gradle.appname=gradle -jar <cli-main.jar> <args>
+exec "\$JAVACMD" \$JVM_OPTS \\
+    "-Dorg.gradle.appname=gradle" \\
+    -jar "\$APP_HOME/lib/${cli_jar}" \\
+    "\$@"
+GRADLEOF
+    chmod 755 "$gradle_dir/bin/gradle"
+
+    # bin/gradle 符号链接（指向 lib/gradle/bin/gradle）
     local bin_dir="$PKG_STAGE$PREFIX/bin"
     install -d -m 755 "$bin_dir"
     ln -sf ../lib/gradle/bin/gradle "$bin_dir/gradle"
-
-    # 删除 Windows 批处理文件（Android 无用）
-    rm -f "$gradle_dir/bin/gradle.bat"
 
     # profile.d: 设置 GRADLE_HOME + Android 适配
     local profile_dir="$PKG_STAGE$PREFIX/etc/profile.d"
@@ -64,4 +120,5 @@ export GRADLE_OPTS="-Dorg.gradle.daemon=false -Djava.io.tmpdir=$PREFIX/tmp ${GRA
 PROFEOF
 
     log "gradle: 安装到 $PREFIX/lib/gradle ($(du -sh "$gradle_dir" | awk '{print $1}'))"
+    log "gradle: 替换为简化启动脚本（绕过 toybox xargs 引号 bug）"
 }
