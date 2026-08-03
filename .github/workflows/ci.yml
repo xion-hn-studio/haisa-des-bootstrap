@@ -40,10 +40,10 @@ jobs:
           sdkmanager "ndk;29.0.14206865"
 
       # openjdk-17 包用 patchelf 重写 ELF 的 RPATH（Termux prefix → haisa-des prefix）
-      # gradle 包用 unzip 解压 distribution zip
+      # gradle 包用 unzip 解压 distribution zip + git clone native-platform 源码 + javac/jar 生成 JNI 头文件
       # ubuntu-latest 默认未装 patchelf，需显式安装
-      - name: Install build tools (patchelf, unzip)
-        run: sudo apt-get install -y patchelf unzip
+      - name: Install build tools (patchelf, unzip, git, default-jdk)
+        run: sudo apt-get install -y patchelf unzip git default-jdk-headless
 
       - name: Build all packages
         env:
@@ -51,6 +51,9 @@ jobs:
           JOBS: 4
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
+          # gradle 包交叉编译 native-platform 需要宿主 JDK 的 javac/jar（生成 JNI 头文件 + 更新 jar）
+          export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-$(dpkg-architecture -q DEB_HOST_MULTIARCH 2>/dev/null || echo amd64)"
+          [ -d "$JAVA_HOME" ] || JAVA_HOME="$(dirname $(dirname $(readlink -f $(which javac))))"
           cd build-system
           ./build.sh build all
           # 注意：不在此调用 make-bootstrap.sh，留作最终打包步骤（见下）。

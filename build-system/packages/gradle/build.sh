@@ -117,6 +117,145 @@ export GRADLE_USER_HOME="${HOME:-$PREFIX/home}/.gradle"
 export GRADLE_OPTS="-Dorg.gradle.daemon=false -Djava.io.tmpdir=$PREFIX/tmp ${GRADLE_OPTS:-}"
 PROFEOF
 
+    # ---- 交叉编译 native-platform .so（Android bionic 兼容）----
+    # Gradle 的 libnative-platform.so 是为标准 Linux (glibc) 编译的，依赖
+    # GLIBC_2.17 版本符号和 libstdc++.so.6，Android bionic 不提供，导致
+    # gradle 报 "Failed to load native library 'libnative-platform.so'"。
+    # 这里用 NDK clang++ 重新编译 native-platform C++ 源码，生成 bionic 兼容的 .so，
+    # 替换 native-platform-linux-aarch64-*.jar 里的 .so。
+    # native-platform .so 替换失败 → 不打 gradle .deb（避免设备端加载旧 .so 仍报错）
+    if ! _build_native_platform "$gradle_dir"; then
+        warn "gradle: native-platform .so 替换失败，跳过 gradle 打包（不生成 .deb）"
+        return 1
+    fi
+
     log "gradle: 安装到 $PREFIX/lib/gradle ($(du -sh "$gradle_dir" | awk '{print $1}'))"
-    log "gradle: 替换为简化启动脚本（绕过 toybox xargs 引号 bug）"
+    log "gradle: 简化启动脚本（绕过 toybox xargs 引号 bug）+ native-platform .so 交叉编译完成"
+}
+
+# 交叉编译 native-platform .so 并替换 jar 里的原始 .so
+# 参数: $1 = gradle 安装目录（$PREFIX/lib/gradle）
+# 失败时返回 1（调用方应跳过 gradle .deb，避免设备端加载旧 .so 仍报错）
+_build_native_platform() {
+    local gradle_dir="$1"
+
+    # native-platform-linux-aarch64-*.jar: 含待替换的 libnative-platform.so
+    local np_jar
+    np_jar=$(ls "$gradle_dir/lib/native-platform-linux-aarch64-"*.jar 2>/dev/null | grep -v ncurses | head -1)
+    [ -n "$np_jar" ] || { warn "gradle: 未找到 native-platform-linux-aarch64 jar，无法替换 .so"; return 1; }
+
+    # native-platform-<ver>.jar（主 jar）: 含全部已编译 Java class，用作 javac classpath。
+    #   JNI 源码 import 了 net.rubygrapefruit.platform.internal.FileSystemList / FunctionResult
+    #   等类（不在 internal/jni 包内），必须用主 jar 才能解析全部符号，否则 javac 失败、
+    #   头文件不生成、.so 编译失败，最终设备端仍加载旧 .so。
+    local np_main_jar
+    np_main_jar=$(ls "$gradle_dir/lib/native-platform-"*.jar 2>/dev/null | grep -v -E 'linux-aarch64|ncurses' | head -1)
+    [ -n "$np_main_jar" ] || { warn "gradle: 未找到 native-platform 主 jar（classpath），无法生成 JNI 头文件"; return 1; }
+
+    local np_src_dir="$SRC_DIR/native-platform-src"
+    local np_build="$WORK_DIR/native-platform-build"
+    rm -rf "$np_build"; mkdir -p "$np_build"
+    local np_cpp_dir="$np_src_dir/native-platform"
+
+    # 1. 下载 native-platform 源码（如未下载）
+    if [ ! -d "$np_cpp_dir" ]; then
+        log "gradle: 下载 native-platform 源码..."
+        git clone --depth 1 https://github.com/gradle/native-platform.git "$np_src_dir" 2>&1 | tail -2
+    fi
+    [ -d "$np_cpp_dir" ] || { warn "gradle: native-platform 源码下载失败"; return 1; }
+
+    # 2. 用 javac -h 生成 JNI 头文件（classpath = 主 jar，解析全部依赖符号）
+    #    这保证 JNI 函数签名与 gradle 实际使用的 class 完全匹配
+    log "gradle: 生成 JNI 头文件 (javac -h, classpath=$(basename "$np_main_jar"))..."
+    local jni_dir="$np_build/jni-headers"
+    mkdir -p "$jni_dir"
+    local javac_cmd="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk}/bin/javac"
+    [ -x "$javac_cmd" ] || javac_cmd="javac"
+    "$javac_cmd" -h "$jni_dir" \
+        -cp "$np_main_jar" \
+        -d "$np_build/classes" \
+        "$np_cpp_dir/src/main/java/net/rubygrapefruit/platform/internal/jni/"*.java 2>&1 | tail -10 || true
+    local np_header="$jni_dir/net_rubygrapefruit_platform_internal_jni_PosixFileSystemFunctions.h"
+    [ -f "$np_header" ] || { warn "gradle: JNI 头文件生成失败（$np_header 不存在）"; return 1; }
+
+    # 3. patch linux.cpp: Android bionic 无 <mntent.h>，改用 /proc/mounts
+    local linux_cpp="$np_build/linux.cpp"
+    {
+        echo '/*'
+        echo ' * Android bionic 兼容版 linux.cpp'
+        echo ' * 原始代码用 <mntent.h>（setmntent/getmntent_r），bionic 不提供，'
+        echo ' * 改用 fopen 读 /proc/mounts + fscanf 解析。'
+        echo ' */'
+        echo '#ifdef __linux__'
+        echo ''
+        echo '#include "generic.h"'
+        echo '#include "net_rubygrapefruit_platform_internal_jni_PosixFileSystemFunctions.h"'
+        echo '#include <stdio.h>'
+        echo '#include <stdlib.h>'
+        echo '#include <sys/inotify.h>'
+        echo '#include <unistd.h>'
+        echo ''
+        echo 'JNIEXPORT void JNICALL'
+        echo 'Java_net_rubygrapefruit_platform_internal_jni_PosixFileSystemFunctions_listFileSystems(JNIEnv* env, jclass target, jobject info, jobject result) {'
+        echo '    FILE* fp = fopen("/proc/mounts", "r");'
+        echo '    if (fp == NULL) {'
+        echo '        mark_failed_with_errno(env, "could not open /proc/mounts", result);'
+        echo '        return;'
+        echo '    }'
+        echo '    jclass info_class = env->GetObjectClass(info);'
+        echo '    jmethodID method = env->GetMethodID(info_class, "add", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZZ)V");'
+        echo '    char device[256], mount_dir[512], fs_type[64], options[256];'
+        echo '    int dump, pass;'
+        echo '    while (fscanf(fp, "%255s %511s %63s %255s %d %d",'
+        echo '                   device, mount_dir, fs_type, options, &dump, &pass) == 6) {'
+        echo '        jstring mount_point = char_to_java(env, mount_dir, result);'
+        echo '        jstring file_system_type = char_to_java(env, fs_type, result);'
+        echo '        jstring device_name = char_to_java(env, device, result);'
+        echo '        env->CallVoidMethod(info, method, mount_point, file_system_type, device_name, JNI_FALSE, JNI_TRUE, JNI_TRUE);'
+        echo '    }'
+        echo '    fclose(fp);'
+        echo '}'
+        echo ''
+        echo '#endif'
+    } > "$linux_cpp"
+
+    # 4a. 生成 native_platform_version.h（上游构建系统生成，仓库未提交）
+    #     generic.h include 它，generic.cpp 用 NATIVE_VERSION 宏（NativeLibraryFunctions.getVersion() 返回值）。
+    #     从主 jar 文件名提取 native-platform 版本号（如 native-platform-0.22-milestone-29.jar → 0.22-milestone-29）。
+    local gen_inc="$np_build/gen-headers"
+    mkdir -p "$gen_inc"
+    local np_version
+    np_version=$(basename "$np_main_jar" | sed -E 's/^native-platform-//; s/\.jar$//')
+    cat > "$gen_inc/native_platform_version.h" <<VEREOF
+#ifndef NATIVE_PLATFORM_VERSION_H
+#define NATIVE_PLATFORM_VERSION_H
+#define NATIVE_VERSION "${np_version}"
+#endif
+VEREOF
+
+    # 4b. 用 NDK clang++ 编译（链接 bionic libc，非 glibc）
+    log "gradle: 交叉编译 libnative-platform.so (NDK clang++)..."
+    local np_inc="-I$np_cpp_dir/src/shared/headers -I$jni_dir -I$gen_inc"
+    local np_srcs="$linux_cpp \
+        $np_cpp_dir/src/main/cpp/posix.cpp \
+        $np_cpp_dir/src/shared/cpp/generic.cpp \
+        $np_cpp_dir/src/shared/cpp/generic_posix.cpp \
+        $np_cpp_dir/src/shared/cpp/unix_strings.cpp"
+    "$CXX" -shared -fPIC $CXXFLAGS $np_inc $np_srcs \
+        -o "$np_build/libnative-platform.so" $LDFLAGS 2>&1 | tail -10 || true
+    [ -f "$np_build/libnative-platform.so" ] || { warn "gradle: libnative-platform.so 编译失败"; return 1; }
+    "$STRIP" "$np_build/libnative-platform.so" 2>/dev/null || true
+    log "gradle: 编译成功 $(du -h "$np_build/libnative-platform.so" | awk '{print $1}')"
+
+    # 5. 替换 native-platform-linux-aarch64-*.jar 里的 .so
+    #    jar 里的路径: net/rubygrapefruit/platform/linux-aarch64/libnative-platform.so
+    log "gradle: 替换 $(basename "$np_jar") 里的 libnative-platform.so..."
+    local jar_cmd="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk}/bin/jar"
+    [ -x "$jar_cmd" ] || jar_cmd="jar"
+    ( cd "$np_build" && \
+      mkdir -p net/rubygrapefruit/platform/linux-aarch64 && \
+      cp libnative-platform.so net/rubygrapefruit/platform/linux-aarch64/ && \
+      "$jar_cmd" uf "$np_jar" net/rubygrapefruit/platform/linux-aarch64/libnative-platform.so 2>&1 | tail -3 ) \
+      || { warn "gradle: jar 更新失败（.so 未替换）"; return 1; }
+    log "gradle: native-platform .so 替换完成"
 }
