@@ -278,9 +278,14 @@ jobs:
       # APK CI 依赖 bootstrap.zip，必须等 bootstrap 上传完成后才能构建
       # （之前 APK CI 和 bootstrap CI 同时触发，APK CI 1分钟完成时 bootstrap 还没上传，
       #   导致 APK 内嵌旧版 bootstrap.zip）
+      # 注意: 此自动触发为 best-effort —— APK 实际通过 APK 仓库单独打 tag 发布（见发布流程）。
+      #   历史上 dispatch 对 xion-hn-studio/haisa-des 返回 404（仓库名/token scope 不匹配），
+      #   故 continue-on-error: true，避免这个非关键下游触发令整个 release 标记为 failure
+      #   （v0.8.2 即因此误报失败，但所有产物其实已正常上传）。
       # -----------------------------------------------------------
       - name: Trigger haisa-des APK CI
         if: startsWith(github.ref, 'refs/tags/v') && matrix.variant == 'prod'
+        continue-on-error: true   # best-effort: APK 由 APK 仓库单独打 tag 发布，此处 404 不得令 release 失败
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
           TAG: ${{ github.ref_name }}
