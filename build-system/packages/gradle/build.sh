@@ -61,20 +61,18 @@ pkg_build() {
 #!/bin/sh
 # haisa-des 简化版 gradle 启动脚本（绕过官方 eval+xargs 在 toybox 上的引号 bug）
 # 原理: 直接用 -jar 调用 gradle-cli-main，JVM 参数手动拼接（不依赖 xargs 解析引号）
+#
+# 注意: make-bootstrap 会把 bin/gradle 符号链接替换为实体文件拷贝，
+# 所以不能用 \$0 推导 APP_HOME（\$0 指向 \$PREFIX/bin/gradle，但 gradle
+# lib 在 \$PREFIX/lib/gradle/）。改用 GRADLE_HOME 环境变量定位 gradle 安装目录。
 set -e
 
-# 解析 APP_HOME（支持 symlink，与官方脚本一致）
-app_path=\$0
-while [ -h "\$app_path" ]; do
-    ls=\$(ls -ld "\$app_path")
-    link=\${ls#*' -> '}
-    case "\$link" in
-        /*) app_path=\$link ;;
-        *)  app_path=\${app_path%/*}/\$link ;;
-    esac
-done
-APP_HOME=\${app_path%/*}/..
-APP_HOME=\$(cd "\$APP_HOME" && pwd)
+# GRADLE_HOME: 优先环境变量（profile.d 设置），否则固定路径 fallback
+GRADLE_HOME="\${GRADLE_HOME:-}"
+if [ -z "\$GRADLE_HOME" ]; then
+    GRADLE_HOME="\${PREFIX:-/data/data/com.haisades/files/usr}/lib/gradle"
+fi
+[ -d "\$GRADLE_HOME/lib" ] || { echo "gradle: 找不到 gradle 安装目录: \$GRADLE_HOME" >&2; exit 1; }
 
 # JAVA_HOME: 优先环境变量，否则从 openjdk-17 profile.d 设置的路径找
 JAVA_HOME="\${JAVA_HOME:-}"
@@ -86,7 +84,7 @@ JAVACMD="\$JAVA_HOME/bin/java"
 [ -x "\$JAVACMD" ] || { echo "gradle: 找不到 java: \$JAVACMD" >&2; exit 1; }
 
 # Gradle 9.x 需要 instrumentation agent（构建性能监控，可选但官方默认启用）
-AGENT_JAR="\$APP_HOME/lib/agents/gradle-instrumentation-agent-9.6.1.jar"
+AGENT_JAR="\$GRADLE_HOME/lib/agents/gradle-instrumentation-agent-9.6.1.jar"
 
 # JVM 参数（与官方 DEFAULT_JVM_OPTS 一致，但直接展开，避免引号解析问题）
 JVM_OPTS="-Xmx64m -Xms64m"
@@ -98,7 +96,7 @@ JVM_OPTS="\$JVM_OPTS \${JAVA_OPTS:-} \${GRADLE_OPTS:-}"
 # 执行: java <jvm opts> -Dorg.gradle.appname=gradle -jar <cli-main.jar> <args>
 exec "\$JAVACMD" \$JVM_OPTS \\
     "-Dorg.gradle.appname=gradle" \\
-    -jar "\$APP_HOME/lib/${cli_jar}" \\
+    -jar "\$GRADLE_HOME/lib/${cli_jar}" \\
     "\$@"
 GRADLEOF
     chmod 755 "$gradle_dir/bin/gradle"
